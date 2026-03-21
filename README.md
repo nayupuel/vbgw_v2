@@ -1,128 +1,165 @@
-# Voicebot Gateway (VBGW)
+# Voicebot Gateway (VBGW) 🚀
 
-Voicebot Gateway (VBGW)는 C++와 PJSUA2(PJSIP)를 기반으로 구축된 고성능 AI 콜봇 게이트웨이 솔루션입니다. PBX 연동, 실시간 STT/TTS 양방향 스트리밍, 그리고 Edge AI(Silero VAD)를 통한 저지연 음성 활동 감지를 지원합니다.
+환영합니다! **Voicebot Gateway(VBGW)**는 전화를 걸고 받을 수 있는 AI 콜봇을 만들기 위한 **핵심 통화 게이트웨이 시스템**입니다. 
+사용자의 목소리를 듣고(STT), 똑똑하게 대답하고(TTS), 사용자가 말을 끊으면 즉시 듣기 모드로 전환(Barge-in)하는 강력한 기능들을 제공합니다.
 
-## 🚀 주요 기능 (Key Features)
+이 문서는 **"프로그래밍 배경지식이 적은 초보자나 인프라 엔지니어도 처음부터 끝까지 따라 할 수 있도록"** 
+가장 친절하고 상세하게 환경 구성부터 테스트까지 안내합니다. 차근차근 따라와 주세요!
 
-- **SIP & Media Core**: PJSIP(PJSUA2)를 이용한 안정적인 SIP 시그널링 및 RTP 미디어 처리.
-- **AI Streaming**: gRPC Bi-directional Streaming을 통한 STT/TTS 엔진과의 초고속 양방향 통신.
-- **Edge VAD**: ONNX Runtime 기반 Silero VAD 엔진을 탑재하여 게이트웨이 단에서 실시간 음성 감지 및 노이즈 필터링.
-- **Barge-in (말끊기)**: 화자가 말을 하는 도중(TTS 재생 중) 사용자가 말을 시작하면(VAD 감지), 즉시 TTS 재생을 중단하고 리스닝 상태로 전환.
-- **PBX 연동**: Asterisk, FreePBX 등 엔터프라이즈 PBX 시스템 자동 등록 및 관중 호 제어.
+---
 
-## 📁 프로젝트 구조 (Project Structure)
+## 🎯 1. 프로그램 개요 (무엇을 하는 프로그램인가요?)
 
-- `src/`: C++ 소스 코드 (Core Engine, AI Client, VAD 등)
-- `protos/`: gRPC 프로토콜 정의 파일 (`voicebot.proto`)
-- `models/`: ONNX VAD 모델 파일 (`silero_vad.onnx`)
-- `config/`: 설정 파일
-- `docs/`: 아키텍처 및 상세 설계 문서
-- `src/emulator/`: 테스팅용 Python gRPC 에뮬레이터 (Mock Server)
+일반적인 웹이나 앱과 달리 전화망(SIP/PBX) 모델과 AI(gRPC) 모델은 서로 통신하는 방식이 완전히 다릅니다.
+VBGW는 이 둘 사이에서 완벽한 통역사 역할을 합니다.
 
-## 🛠️ 설치 방법 (Installation)
+1. **전화망(SIP) 역할**: 일반 전화기(Softphone)나 기업용 통신 장비(PBX)로부터 걸려오는 전화를 받습니다.
+2. **미디어 변환 (RTP ↔ PCM)**: 전화기에서 오는 8kHz 오디오를 AI가 이해할 수 있는 16kHz 고음질 오디오로 실시간 변환합니다.
+3. **AI 플러그 (gRPC)**: 변환된 오디오를 AI 엔진(STT/TTS)에 초고속으로 스트리밍하여 실시간 대화를 가능하게 합니다.
+4. **로컬 Edge VAD**: 게이트웨이 자체가 마이크의 소리를 분석해 "사용자가 말을 하고 있는지(음성 감지)"를 스스로 판단합니다.
 
-### 1. 필수 의존성 설치 (macOS / Homebrew 기준)
+---
 
-본 프로젝트는 macOS (Apple Silicon 권장) 환경에서 최적화되어 있습니다. 아래 명령어로 필요한 라이브러리를 설치하십시오.
+## 🛠️ 2. Step 1: 개발 환경 구성 (Prerequisites)
 
+이 프로젝트는 **macOS (Apple Silicon M1/M2/M3 권장)** 환경에 최적화되어 있습니다.
+터미널(Terminal) 앱을 열고 아래 순서대로 명령어를 복사해서 붙여넣어 주세요.
+
+### 2.1 Homebrew 설치 (패키지 관리자)
+Mac에서 개발 도구들을 쉽게 설치하기 위한 프로그램입니다. (이미 설치되어 있다면 넘어갑니다.)
 ```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### 2.2 필수 라이브러리 설치
+C++ 게이트웨이를 빌드하기 위해 필요한 부품(라이브러리)들을 설치합니다. 한 줄씩 복사해서 실행하세요.
+```bash
+brew update
 brew install cmake pjproject grpc protobuf openssl spdlog boost onnxruntime
 ```
+*💡 설치 중 에러가 발생하면 무시하지 말고 해당 에러 메시지를 검색하거나 `docs/troubleshooting.md`를 참고하세요.*
 
-### 2. C++ 게이트웨이 빌드
+---
 
-CMake를 사용하여 프로젝트를 빌드합니다.
+## 🏗️ 3. Step 2: VBGW 게이트웨이 빌드 및 설치
+
+통신 서버(게이트웨이) 프로그램을 뚝딱뚝딱 조립(빌드)하는 과정입니다.
+
+1. 터미널을 열고 VBGW 프로젝트 폴더(이 파일이 있는 곳)로 이동합니다.
+2. 아래 명령어를 순서대로 실행합니다.
 
 ```bash
-mkdir build && cd build
+# 1. 빌드용 폴더를 만들고 그 안으로 들어갑니다.
+mkdir -p build && cd build
+
+# 2. CMake를 통해 빌드 설계도를 작성합니다.
 cmake ..
-make -j$(nproc)
+
+# 3. 작성된 설계도를 바탕으로 실제 프로그램을 컴파일합니다. (컴퓨터 코어 수만큼 빠르게 빌드)
+make -j$(sysctl -n hw.ncpu)
 ```
 
-빌드가 완료되면 `build/vbgw` 실행 파일이 생성됩니다.
+✅ **성공 확인**: 빌드가 100% 완료되면 `build/` 폴더 안에 `vbgw` 라는 초록색 실행 파일이 생성됩니다.
 
-### 3. Python 에뮬레이터 설정
+---
+
+## 🤖 4. Step 3: 가상의 AI 엔진 (에뮬레이터) 설치
+
+우리에게는 아직 진짜 AI(STT/TTS) 서버가 없습니다. 따라서 **게이트웨이랑 통신하며 가짜로 대답해주는 AI 모의 서버(Python 에뮬레이터)**를 세팅해야 합니다.
+
+터미널을 **새로 하나 더 열고(혹은 새 탭)** 프로젝트 루트 폴더에서 다음을 진행합니다.
 
 ```bash
+# 1. 에뮬레이터 폴더로 이동
 cd src/emulator
+
+# 2. 파이썬 격리 환경(가상환경) 생성 (컴퓨터 환경이 꼬이지 않게 보호)
 python3 -m venv venv
+
+# 3. 가상환경 접속 (프롬프트 왼쪽에 (venv)가 생김)
 source venv/bin/activate
+
+# 4. 에뮬레이터 구동에 필요한 파이썬 패키지 설치
 pip install -r requirements.txt
 ```
 
-## ⚙️ 설정 (Configuration)
+---
 
-게이트웨이는 환경 변수를 통해 PBX 등록 정보를 설정할 수 있습니다. 설정하지 않을 경우 로컬 모드(Direct IP Call)로 동작합니다.
+## ⚙️ 5. Step 4: 환경 변수(설정 값) 세팅
 
-| 환경 변수 | 설명 | 예시 (기본값) |
-| :--- | :--- | :--- |
-| `PBX_URI` | PBX 서버 Registrar URI | `sip:192.168.1.100` |
-| `PBX_ID_URI` | PBX 등록 ID URI | `sip:1001@192.168.1.100` |
-| `PBX_USERNAME` | PBX 인증 사용자 아이디 | `1001` |
-| `PBX_PASSWORD` | PBX 인증 비밀번호 | `password123` |
-| `AI_ENGINE_ADDR` | AI STT/TTS gRPC 서버 주소 | `localhost:50051` |
-| `MAX_CONCURRENT_CALLS` | 최대 동시 허용 채널 수 | `100` |
-| `LOG_LEVEL` | 애플리케이션 로그 레벨 | `info` |
+VBGW 게이트웨이는 전화를 어디로 받을지, 로그는 얼마나 자세히 찍을지 등을 설정 파일(`.env`)에서 관리합니다.
 
-> 💡 **Tip:** `config/.env.example` 파일을 복사하여 `.env`를 생성하고 적용(`source .env`)하면 편리합니다.
+1. 프로젝트 최상위 폴더(루트)로 돌아옵니다.
+2. 친절하게 준비된 예제 설정 파일을 실제 설정 파일로 복사합니다.
 
-## 🧪 테스트 방법 (Testing Guide)
+```bash
+cp config/.env.example .env
+```
 
-이 섹션에서는 에뮬레이터를 사용하여 시스템을 테스트하는 상세한 방법을 설명합니다.
+3. (선택) `.env` 파일을 텍스트 에디터로 열어봅니다. 당장 건드릴 것은 없지만, 궁금하시면 설정값을 바꿀 수 있습니다.
+4. 터미널에 설정값을 반영합니다. (게이트웨이를 실행할 터미널 창에서 매번 입력해 주어야 합니다.)
 
-### 1단계: AI 에뮬레이터 실행 (Mock Server)
-STT/TTS 역할을 가상으로 수행할 에뮬레이터를 먼저 실행합니다.
+```bash
+source .env
+```
 
+---
+
+## 🎧 6. Step 5: 본격적인 테스트 진행! (Testing Guide)
+
+자, 이제 모든 준비가 끝났습니다. 화면에 두 개의 터미널 창(또는 탭)을 띄워 놓고 따라 하세요.
+
+### 터미널 [A]: AI 에뮬레이터 켜기
+먼저 AI 서버부터 깨워야 합니다.
 ```bash
 cd src/emulator
 source venv/bin/activate
 
-# 방법 A: 단순 Mock 서버 (삐- 소리 응답)
-python mock_server.py
-
-# 방법 B: 고급 에뮬레이터 (WAV 파일 재생 및 사용자 음성 캡처)
+# Mock Server 실행! (대기 모드로 들어갑니다)
 python emulator.py
 ```
-*에뮬레이터는 `:50051` 포트에서 gRPC 요청을 대기합니다.*
+*(예상 화면: "AI Mock Server listening on port 50051...")*
 
-### 2단계: Voicebot Gateway 실행
-게이트웨이를 실행하여 에뮬레이터와 연결하고 SIP 호를 대기합니다.
 
+### 터미널 [B]: VBGW 게이트웨이 켜기
+AI가 준비되었으니 게이트웨이를 켭니다.
 ```bash
-# 로컬 모드 실행 (직접 IP 호출 대기)
+# 프로젝트 루트 폴더인지 확인 후
+source .env
 ./build/vbgw
 ```
-*실행 시 `[VBGW] Local Mode Enabled (No PBX). Direct IP calls: sip:voicebot@127.0.0.1` 로그가 확인되어야 합니다.*
-
-### 3단계: SIP Softphone으로 전화 걸기
-실제 전화기 대신 사용 중인 PC에 SIP Softphone(예: **Linphone**, **MicroSIP**)을 설치하여 테스트합니다.
-
-1.  **호출 대상**: `sip:voicebot@127.0.0.1:5060` (또는 실제 설치된 PC의 IP)
-2.  **연결 확인**: 전화가 연결되면 에뮬레이터 로그에 `New Session Started` 또는 `New SIP Call connected` 메시지가 나타납니다.
-3.  **VAD 테스트**: 마이크에 대고 말을 시작하면 게이트웨이 로그에 `[VAD] Speaking started`가 찍히며 AI로 음성 데이터가 전달됩니다.
-4.  **TTS 테스트**: 말을 멈추면 에뮬레이터가 모의 답변(삐- 소리 또는 샘플 음원)을 게이트웨이로 전송하고, 스피커를 통해 들리는지 확인합니다.
-5.  **말끊기(Barge-in) 테스트**: AI가 답변(소리 재생)을 하는 도중에 말을 해보십시오. AI 소리가 즉시 끊어지고 다시 리스닝 모드로 들어가는지 확인합니다.
-
-## 🏗️ 시스템 아키텍처 (Architecture)
-
-```mermaid
-graph TD
-    User[고객 📱] <--> |Voice| PBX[PBX / SBC]
-    
-    subgraph Callbot Gateway [VBGW (C++)]
-        SIP_End[SIP Endpoint]
-        Media_Port[RTP Media Port]
-        VAD[Silero VAD (ONNX)]
-        AI_Connector[gRPC Stream Connector]
-        
-        SIP_End <--> Media_Port
-        Media_Port <--> VAD
-        Media_Port <--> AI_Connector
-    end
-    
-    PBX <--> |SIP/RTP| SIP_End
-    AI_Connector <--> |gRPC Bi-Stream| AI_Engines[AI Engines (STT/TTS)]
-```
+*(예상 화면: "[VBGW] Local Mode Enabled... Direct IP calls: sip:voicebot@127.0.0.1")*
 
 ---
-© 2026 Voicebot Gateway Team. All rights reserved.
+
+### 터미널 [C] (내 노트북): SIP 통화 앱(Softphone)으로 전화 걸기!
+전화를 걸 스마트폰 역할의 앱이 PC에 하나 필요합니다. 가장 많이 쓰이는 무료 프로그램 **Linphone**을 추천합니다.
+
+1. [Linphone 공식 홈페이지](https://new.linphone.org/software)에서 데스크톱 버전을 다운로드 및 설치합니다.
+2. 프로그램을 실행하고 "계정 생성"이나 "로그인"은 모두 **건너뛰기(Skip)** 합니다. (회원가입 필요 없음!)
+3. 메인 화면 맨 위 검색/다이얼 창에 다음 주소를 입력합니다:
+   👉 **`sip:voicebot@127.0.0.1:5060`**
+4. 전화 아이콘📞 을 눌러 통화를 시작해 봅니다.
+
+### 🎉 테스트 시크립트 (이렇게 대화해보세요)
+
+| 단계 | 나의 행동 | 시스템의 반응 |
+| :--- | :--- | :--- |
+| **연결 성공** | 전화를 받음 | 에뮬레이터(터미널[A])에 `New SIP Call connected` 로그가 찍힘. |
+| **인식 (VAD)** | "안녕하세요?" 하고 **말함** | 게이트웨이(터미널[B])에 `[VAD] Speaking started` 로그가 찍힘. |
+| **답변 (TTS)** | 말을 멈추고 **기다림** | 에뮬레이터가 삐- 소리나 샘플 답변을 보냄, **내 헤드셋 스피커로 소리가 나옴!** |
+| **말끊기 (Barge-in)** | 스피커에서 답변 소리가 나오는 **도중에 내가 다시 시끄럽게 떠듦** | 💡 AI의 말소리가 **즉각 뚝 끊기며**, 다시 나의 말을 듣기 모드로 전환됨! |
+| **종료** | 빨간색 종료 버튼을 누름 | 깔끔하게 세션이 종료(Disconnected) 됨. |
+
+---
+
+## 📚 7. 잘 안 되나요? (Troubleshooting)
+
+만약 에러가 발생하거나 전화 연결이 안 된다면 걱정하지 마세요. 자주 발생하는 문제의 해결법을 모아두었습니다!
+
+- **문제가 생겼을 때**: 👉 [docs/troubleshooting.md](docs/troubleshooting.md) 를 클릭해서 읽어보세요. 
+- 시스템 구조가 궁금할 때: 👉 [docs/architecture.md](docs/architecture.md)
+- API 연동 방법이 궁금할 때: 👉 [docs/api_spec.md](docs/api_spec.md)
+
+---
+*© 2026 Voicebot Gateway Team. 개발자들을 응원합니다!*
