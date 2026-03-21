@@ -31,3 +31,5 @@
 7	4144	1774100276956237234	CMakeFiles/vbgw.dir/src/engine/VoicebotCall.cpp.o	27e216b67e6839af
 7	4151	1774100276956380025	CMakeFiles/vbgw.dir/src/engine/VoicebotMediaPort.cpp.o	bb033e753aef9b0a
 4151	4451	1774100281099950349	vbgw	f2093d0bbe0eb4b3
+6	1182	1774101088543959776	CMakeFiles/vbgw.dir/src/main.cpp.o	5abedd45bc04e092
+1184	1465	1774101089721694163	vbgw	f2093d0bbe0eb4b3

@@ -31,13 +31,32 @@ int main() {
     ep.start(5060); // Listen on SIP port 5060
 
     pj::AccountConfig acc_cfg;
-    acc_cfg.idUri = "sip:voicebot@127.0.0.1";
     
-    // Create a local account
+    // 환경변수를 통한 PBX 동적 등록 지원 (Asterisk, FreePBX 연동용)
+    const char* pbx_uri = std::getenv("PBX_URI");
+    const char* pbx_id_uri = std::getenv("PBX_ID_URI");
+    const char* pbx_username = std::getenv("PBX_USERNAME");
+    const char* pbx_password = std::getenv("PBX_PASSWORD");
+
+    if (pbx_uri && pbx_id_uri && pbx_username && pbx_password) {
+        acc_cfg.idUri = pbx_id_uri;
+        acc_cfg.regConfig.registrarUri = pbx_uri;
+        acc_cfg.sipConfig.authCreds.push_back(
+            pj::AuthCredInfo("digest", "*", pbx_username, 0, pbx_password)
+        );
+        spdlog::info("[VBGW] PBX Registration Mode Enabled.");
+        spdlog::info("       - Registrar: {}", pbx_uri);
+        spdlog::info("       - ID URI: {}", pbx_id_uri);
+    } else {
+        acc_cfg.idUri = "sip:voicebot@127.0.0.1";
+        spdlog::info("[VBGW] Local Mode Enabled (No PBX). Direct IP calls: {}", acc_cfg.idUri);
+    }
+    
+    // 계정 생성 및 PBX REG 등록
     VoicebotAccount acc;
     try {
         acc.create(acc_cfg);
-        std::cout << "Voicebot Account created. Listening for calls..." << std::endl;
+        spdlog::info("Voicebot Account created. Listening or Registered to PBX successfully!");
     } catch(pj::Error& err) {
         std::cerr << "Error creating account: " << err.info() << std::endl;
         return 1;
