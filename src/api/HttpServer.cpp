@@ -12,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -106,6 +107,174 @@ bool parseTargetUri(const std::string& body, std::string* target_uri)
     }
     *target_uri = body.substr(quote_start + 1, quote_end - quote_start - 1);
     return true;
+}
+
+bool parseJsonStringField(const std::string& body, const std::string& field, std::string* out)
+{
+    if (!out) {
+        return false;
+    }
+    const std::string key = "\"" + field + "\"";
+    const auto key_pos = body.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto colon_pos = body.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+    const auto quote_start = body.find('"', colon_pos + 1);
+    if (quote_start == std::string::npos) {
+        return false;
+    }
+    const auto quote_end = body.find('"', quote_start + 1);
+    if (quote_end == std::string::npos) {
+        return false;
+    }
+    *out = body.substr(quote_start + 1, quote_end - quote_start - 1);
+    return true;
+}
+
+bool parseJsonIntField(const std::string& body, const std::string& field, int* out)
+{
+    if (!out) {
+        return false;
+    }
+    const std::string key = "\"" + field + "\"";
+    const auto key_pos = body.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto colon_pos = body.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+
+    std::size_t pos = colon_pos + 1;
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) {
+        ++pos;
+    }
+    if (pos >= body.size()) {
+        return false;
+    }
+
+    std::size_t end = pos;
+    if (body[end] == '-') {
+        ++end;
+    }
+    while (end < body.size() && std::isdigit(static_cast<unsigned char>(body[end]))) {
+        ++end;
+    }
+    if (end == pos || (end == pos + 1 && body[pos] == '-')) {
+        return false;
+    }
+
+    try {
+        *out = std::stoi(body.substr(pos, end - pos));
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+bool parseCallIdFromPath(const std::string& path, const std::string& suffix, int* out_call_id)
+{
+    if (!out_call_id) {
+        return false;
+    }
+
+    constexpr const char* prefix = "/api/v1/calls/";
+    if (path.rfind(prefix, 0) != 0) {
+        return false;
+    }
+
+    const std::size_t start = std::strlen(prefix);
+    const auto suffix_pos = path.rfind(suffix);
+    if (suffix_pos == std::string::npos || suffix_pos <= start ||
+        suffix_pos + suffix.size() != path.size()) {
+        return false;
+    }
+
+    const std::string call_id_str = path.substr(start, suffix_pos - start);
+    if (call_id_str.empty()) {
+        return false;
+    }
+    for (char c : call_id_str) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+
+    try {
+        *out_call_id = std::stoi(call_id_str);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+bool isValidDtmfDigits(const std::string& digits)
+{
+    if (digits.empty() || digits.size() > 64) {
+        return false;
+    }
+    for (char c : digits) {
+        if ((c >= '0' && c <= '9') || c == '*' || c == '#' || c == 'A' || c == 'B' || c == 'C' ||
+            c == 'D' || c == 'a' || c == 'b' || c == 'c' || c == 'd') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+struct AggregatedCallMediaStats
+{
+    std::uint64_t streams = 0;
+    std::uint64_t rx_packets = 0;
+    std::uint64_t tx_packets = 0;
+    std::uint64_t rx_lost = 0;
+    std::uint64_t rx_discard = 0;
+    std::uint64_t rx_dup = 0;
+    std::uint64_t rx_reorder = 0;
+    std::uint64_t sum_rx_jitter_usec = 0;
+    std::uint64_t sum_rtt_usec = 0;
+    std::uint64_t sum_jbuf_delay_ms = 0;
+    std::uint64_t jbuf_lost = 0;
+    std::uint64_t jbuf_discard = 0;
+    std::uint64_t recording_active_calls = 0;
+};
+
+AggregatedCallMediaStats collectAggregatedMediaStats()
+{
+    AggregatedCallMediaStats out;
+    const auto calls = SessionManager::getInstance().getActiveCallsSnapshot();
+    for (const auto& call : calls) {
+        if (!call) {
+            continue;
+        }
+
+        VoicebotCall::RtpStatsSnapshot snap;
+        std::string err;
+        if (call->getRtpStatsSnapshot(&snap, &err) && snap.valid) {
+            out.streams += 1;
+            out.rx_packets += snap.rx_packets;
+            out.tx_packets += snap.tx_packets;
+            out.rx_lost += snap.rx_lost;
+            out.rx_discard += snap.rx_discard;
+            out.rx_dup += snap.rx_dup;
+            out.rx_reorder += snap.rx_reorder;
+            out.sum_rx_jitter_usec += snap.rx_jitter_mean_usec;
+            out.sum_rtt_usec += snap.rtt_mean_usec;
+            out.sum_jbuf_delay_ms += snap.jbuf_avg_delay_ms;
+            out.jbuf_lost += snap.jbuf_lost;
+            out.jbuf_discard += snap.jbuf_discard;
+        }
+        if (call->isRecording()) {
+            out.recording_active_calls += 1;
+        }
+    }
+    return out;
 }
 
 // [S-2 Fix] SIP URI 인젝션 방어 강화
@@ -378,6 +547,37 @@ void HttpServer::handleConnectionImpl(void* socket_ptr)
             const auto it = headers.find("x-admin-key");
             const std::string admin_key = (it != headers.end()) ? it->second : "";
             response = handleOutboundCall(body, admin_key, remote_ip);
+        } else if (req_method == "POST") {
+            int call_id = PJSUA_INVALID_ID;
+            const auto it = headers.find("x-admin-key");
+            const std::string admin_key = (it != headers.end()) ? it->second : "";
+
+            if (req_path == "/api/v1/calls/bridge") {
+                response = handleBridgeCalls(body, admin_key, remote_ip, false);
+            } else if (req_path == "/api/v1/calls/unbridge") {
+                response = handleBridgeCalls(body, admin_key, remote_ip, true);
+            } else if (parseCallIdFromPath(req_path, "/dtmf", &call_id)) {
+                response = handleCallDtmf(call_id, body, admin_key, remote_ip);
+            } else if (parseCallIdFromPath(req_path, "/transfer", &call_id)) {
+                response = handleCallTransfer(call_id, body, admin_key, remote_ip);
+            } else if (parseCallIdFromPath(req_path, "/record/start", &call_id)) {
+                response = handleCallRecordStart(call_id, body, admin_key, remote_ip);
+            } else if (parseCallIdFromPath(req_path, "/record/stop", &call_id)) {
+                response = handleCallRecordStop(call_id, admin_key, remote_ip);
+            } else {
+                response = makeHttpResponse(404, "Not Found", "{\"error\":\"not_found\"}",
+                                            "application/json");
+            }
+        } else if (req_method == "GET") {
+            int call_id = PJSUA_INVALID_ID;
+            if (parseCallIdFromPath(req_path, "/stats", &call_id)) {
+                const auto it = headers.find("x-admin-key");
+                const std::string admin_key = (it != headers.end()) ? it->second : "";
+                response = handleCallStats(call_id, admin_key, remote_ip);
+            } else {
+                response = makeHttpResponse(404, "Not Found", "{\"error\":\"not_found\"}",
+                                            "application/json");
+            }
         } else {
             response =
                 makeHttpResponse(404, "Not Found", "{\"error\":\"not_found\"}", "application/json");
@@ -401,6 +601,7 @@ std::string HttpServer::handleHealthCheck() const
     const auto& cfg = AppConfig::instance();
     auto& metrics = RuntimeMetrics::instance();
     const auto active_calls = SessionManager::getInstance().getActiveCallCount();
+    const auto media = collectAggregatedMediaStats();
     const bool overall_ok = isGatewayReady(metrics);
 
     std::ostringstream body;
@@ -416,6 +617,14 @@ std::string HttpServer::handleHealthCheck() const
          << ",\"dropped_frames_total\":" << metrics.grpcDroppedFramesTotal()
          << ",\"reconnect_attempts_total\":" << metrics.grpcReconnectAttemptsTotal()
          << ",\"stream_errors_total\":" << metrics.grpcStreamErrorsTotal() << "},"
+         << "\"rtp\":{\"streams\":" << media.streams << ",\"rx_packets\":" << media.rx_packets
+         << ",\"tx_packets\":" << media.tx_packets << ",\"rx_lost\":" << media.rx_lost
+         << ",\"mean_rx_jitter_usec\":"
+         << (media.streams ? (media.sum_rx_jitter_usec / media.streams) : 0)
+         << ",\"mean_rtt_usec\":" << (media.streams ? (media.sum_rtt_usec / media.streams) : 0)
+         << ",\"mean_jbuf_delay_ms\":"
+         << (media.streams ? (media.sum_jbuf_delay_ms / media.streams) : 0)
+         << ",\"recording_active_calls\":" << media.recording_active_calls << "},"
          << "\"admin_api\":{\"outbound_requests_total\":" << metrics.adminApiOutboundRequestsTotal()
          << ",\"outbound_accepted_total\":" << metrics.adminApiOutboundAcceptedTotal()
          << ",\"outbound_rejected_auth_total\":" << metrics.adminApiOutboundRejectedAuthTotal()
@@ -451,6 +660,10 @@ std::string HttpServer::handleMetrics() const
 {
     auto& metrics = RuntimeMetrics::instance();
     const auto active_calls = SessionManager::getInstance().getActiveCallCount();
+    const auto media = collectAggregatedMediaStats();
+    const auto mean_rx_jitter_usec = media.streams ? (media.sum_rx_jitter_usec / media.streams) : 0;
+    const auto mean_rtt_usec = media.streams ? (media.sum_rtt_usec / media.streams) : 0;
+    const auto mean_jbuf_delay_ms = media.streams ? (media.sum_jbuf_delay_ms / media.streams) : 0;
 
     std::ostringstream body;
     body
@@ -481,6 +694,39 @@ std::string HttpServer::handleMetrics() const
         << "# HELP vbgw_barge_in_events_total Barge-in events observed from AI engine\n"
         << "# TYPE vbgw_barge_in_events_total counter\n"
         << "vbgw_barge_in_events_total " << metrics.bargeInEventsTotal() << "\n"
+        << "# HELP vbgw_rtp_streams Active RTP streams with stats\n"
+        << "# TYPE vbgw_rtp_streams gauge\n"
+        << "vbgw_rtp_streams " << media.streams << "\n"
+        << "# HELP vbgw_rtp_rx_packets_total RTP packets received (sum)\n"
+        << "# TYPE vbgw_rtp_rx_packets_total counter\n"
+        << "vbgw_rtp_rx_packets_total " << media.rx_packets << "\n"
+        << "# HELP vbgw_rtp_tx_packets_total RTP packets sent (sum)\n"
+        << "# TYPE vbgw_rtp_tx_packets_total counter\n"
+        << "vbgw_rtp_tx_packets_total " << media.tx_packets << "\n"
+        << "# HELP vbgw_rtp_rx_lost_total RTP packets lost (sum)\n"
+        << "# TYPE vbgw_rtp_rx_lost_total counter\n"
+        << "vbgw_rtp_rx_lost_total " << media.rx_lost << "\n"
+        << "# HELP vbgw_rtp_rx_discard_total RTP packets discarded (sum)\n"
+        << "# TYPE vbgw_rtp_rx_discard_total counter\n"
+        << "vbgw_rtp_rx_discard_total " << media.rx_discard << "\n"
+        << "# HELP vbgw_rtp_rx_dup_total RTP duplicate packets (sum)\n"
+        << "# TYPE vbgw_rtp_rx_dup_total counter\n"
+        << "vbgw_rtp_rx_dup_total " << media.rx_dup << "\n"
+        << "# HELP vbgw_rtp_rx_reorder_total RTP out-of-order packets (sum)\n"
+        << "# TYPE vbgw_rtp_rx_reorder_total counter\n"
+        << "vbgw_rtp_rx_reorder_total " << media.rx_reorder << "\n"
+        << "# HELP vbgw_rtp_rx_jitter_usec_mean Mean RTP jitter in usec across streams\n"
+        << "# TYPE vbgw_rtp_rx_jitter_usec_mean gauge\n"
+        << "vbgw_rtp_rx_jitter_usec_mean " << mean_rx_jitter_usec << "\n"
+        << "# HELP vbgw_rtp_rtt_usec_mean Mean RTP round-trip time in usec across streams\n"
+        << "# TYPE vbgw_rtp_rtt_usec_mean gauge\n"
+        << "vbgw_rtp_rtt_usec_mean " << mean_rtt_usec << "\n"
+        << "# HELP vbgw_jbuf_avg_delay_ms_mean Mean jitter buffer delay in ms across streams\n"
+        << "# TYPE vbgw_jbuf_avg_delay_ms_mean gauge\n"
+        << "vbgw_jbuf_avg_delay_ms_mean " << mean_jbuf_delay_ms << "\n"
+        << "# HELP vbgw_recording_active_calls Number of calls currently being recorded\n"
+        << "# TYPE vbgw_recording_active_calls gauge\n"
+        << "vbgw_recording_active_calls " << media.recording_active_calls << "\n"
         << "# HELP vbgw_admin_api_outbound_requests_total Total outbound call API requests\n"
         << "# TYPE vbgw_admin_api_outbound_requests_total counter\n"
         << "vbgw_admin_api_outbound_requests_total " << metrics.adminApiOutboundRequestsTotal()
@@ -608,6 +854,310 @@ std::string HttpServer::handleOutboundCall(const std::string& request_body,
     std::ostringstream body;
     body << "{\"status\":\"Accepted\",\"message\":\"Outbound call initiated.\",\"target_uri\":\""
          << jsonEscape(target_uri) << "\",\"call_id\":" << call_id << "}";
+    return makeHttpResponse(202, "Accepted", body.str(), "application/json");
+}
+
+std::string HttpServer::handleCallDtmf(int call_id, const std::string& json_body,
+                                       const std::string& admin_key,
+                                       const std::string& remote_ip) const
+{
+    const auto& cfg = AppConfig::instance();
+
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    std::string digits;
+    if (!parseJsonStringField(json_body, "digits", &digits) || !isValidDtmfDigits(digits)) {
+        return makeHttpResponse(400, "Bad Request",
+                                "{\"error\":\"invalid_request\",\"message\":\"digits must be "
+                                "valid DTMF chars\"}",
+                                "application/json");
+    }
+
+    std::string target = "peer";
+    parseJsonStringField(json_body, "target", &target);
+    target = toLower(trim(target));
+    if (target != "peer" && target != "ai" && target != "both") {
+        return makeHttpResponse(400, "Bad Request",
+                                "{\"error\":\"invalid_request\",\"message\":\"target must be "
+                                "peer|ai|both\"}",
+                                "application/json");
+    }
+
+    auto call = SessionManager::getInstance().getCall(call_id);
+    if (!call) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    bool ok = true;
+    std::string error_message;
+    if (target == "peer" || target == "both") {
+        if (!call->sendDtmfToPeer(digits, &error_message)) {
+            ok = false;
+        }
+    }
+    if (ok && (target == "ai" || target == "both")) {
+        if (!call->sendDtmfToAi(digits, &error_message)) {
+            ok = false;
+        }
+    }
+
+    if (!ok) {
+        std::ostringstream body;
+        body << "{\"error\":\"dtmf_send_failed\",\"message\":\""
+             << jsonEscape(error_message.empty() ? "unknown" : error_message) << "\"}";
+        spdlog::warn("[Audit][HTTP] call_dtmf failed [remote_ip={}, call_id={}, target={}, "
+                     "digits={}, error={}]",
+                     remote_ip, call_id, target, digits, error_message);
+        return makeHttpResponse(500, "Internal Server Error", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"status\":\"Accepted\",\"call_id\":" << call_id << ",\"target\":\"" << target
+         << "\",\"digits\":\"" << jsonEscape(digits) << "\"}";
+    return makeHttpResponse(202, "Accepted", body.str(), "application/json");
+}
+
+std::string HttpServer::handleCallTransfer(int call_id, const std::string& json_body,
+                                           const std::string& admin_key,
+                                           const std::string& remote_ip) const
+{
+    const auto& cfg = AppConfig::instance();
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    std::string target_uri;
+    if (!parseJsonStringField(json_body, "target_uri", &target_uri) || !isValidSipUri(target_uri)) {
+        return makeHttpResponse(400, "Bad Request",
+                                "{\"error\":\"invalid_request\",\"message\":\"target_uri must be "
+                                "a valid sip/sips URI\"}",
+                                "application/json");
+    }
+
+    auto call = SessionManager::getInstance().getCall(call_id);
+    if (!call) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    std::string err;
+    if (!call->transferTo(target_uri, &err)) {
+        std::ostringstream body;
+        body << "{\"error\":\"transfer_failed\",\"message\":\""
+             << jsonEscape(err.empty() ? "unknown" : err) << "\"}";
+        spdlog::warn("[Audit][HTTP] transfer failed [remote_ip={}, call_id={}, target_uri={}, "
+                     "error={}]",
+                     remote_ip, call_id, target_uri, err);
+        return makeHttpResponse(500, "Internal Server Error", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"status\":\"Accepted\",\"call_id\":" << call_id << ",\"target_uri\":\""
+         << jsonEscape(target_uri) << "\"}";
+    return makeHttpResponse(202, "Accepted", body.str(), "application/json");
+}
+
+std::string HttpServer::handleCallStats(int call_id, const std::string& admin_key,
+                                        const std::string& remote_ip) const
+{
+    const auto& cfg = AppConfig::instance();
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    auto call = SessionManager::getInstance().getCall(call_id);
+    if (!call) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    VoicebotCall::RtpStatsSnapshot snap;
+    std::string err;
+    if (!call->getRtpStatsSnapshot(&snap, &err)) {
+        std::ostringstream body;
+        body << "{\"error\":\"stats_unavailable\",\"message\":\""
+             << jsonEscape(err.empty() ? "unknown" : err) << "\"}";
+        spdlog::warn("[Audit][HTTP] stats unavailable [remote_ip={}, call_id={}, error={}]",
+                     remote_ip, call_id, err);
+        return makeHttpResponse(503, "Service Unavailable", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"call_id\":" << call_id << ",\"valid\":" << boolToJson(snap.valid)
+         << ",\"media_index\":" << snap.media_index << ",\"rx_packets\":" << snap.rx_packets
+         << ",\"tx_packets\":" << snap.tx_packets << ",\"rx_lost\":" << snap.rx_lost
+         << ",\"rx_discard\":" << snap.rx_discard << ",\"rx_reorder\":" << snap.rx_reorder
+         << ",\"rx_dup\":" << snap.rx_dup << ",\"rx_jitter_mean_usec\":" << snap.rx_jitter_mean_usec
+         << ",\"rtt_mean_usec\":" << snap.rtt_mean_usec
+         << ",\"jbuf_avg_delay_ms\":" << snap.jbuf_avg_delay_ms
+         << ",\"jbuf_lost\":" << snap.jbuf_lost << ",\"jbuf_discard\":" << snap.jbuf_discard
+         << ",\"src_rtp\":\"" << jsonEscape(snap.src_rtp) << "\",\"src_rtcp\":\""
+         << jsonEscape(snap.src_rtcp) << "\",\"recording\":" << boolToJson(call->isRecording())
+         << ",\"recording_file\":\"" << jsonEscape(call->recordingFilePath()) << "\"}";
+    return makeHttpResponse(200, "OK", body.str(), "application/json");
+}
+
+std::string HttpServer::handleCallRecordStart(int call_id, const std::string& json_body,
+                                              const std::string& admin_key,
+                                              const std::string& remote_ip) const
+{
+    const auto& cfg = AppConfig::instance();
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    auto call = SessionManager::getInstance().getCall(call_id);
+    if (!call) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    std::string path;
+    parseJsonStringField(json_body, "file_path", &path);
+    std::string err;
+    if (!call->startRecording(path, &err)) {
+        std::ostringstream body;
+        body << "{\"error\":\"record_start_failed\",\"message\":\""
+             << jsonEscape(err.empty() ? "unknown" : err) << "\"}";
+        spdlog::warn("[Audit][HTTP] record start failed [remote_ip={}, call_id={}, error={}]",
+                     remote_ip, call_id, err);
+        return makeHttpResponse(500, "Internal Server Error", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"status\":\"Accepted\",\"call_id\":" << call_id << ",\"recording\":true,"
+         << "\"file_path\":\"" << jsonEscape(call->recordingFilePath()) << "\"}";
+    return makeHttpResponse(202, "Accepted", body.str(), "application/json");
+}
+
+std::string HttpServer::handleCallRecordStop(int call_id, const std::string& admin_key,
+                                             const std::string& remote_ip) const
+{
+    const auto& cfg = AppConfig::instance();
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    auto call = SessionManager::getInstance().getCall(call_id);
+    if (!call) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    std::string err;
+    if (!call->stopRecording(&err)) {
+        std::ostringstream body;
+        body << "{\"error\":\"record_stop_failed\",\"message\":\""
+             << jsonEscape(err.empty() ? "unknown" : err) << "\"}";
+        spdlog::warn("[Audit][HTTP] record stop failed [remote_ip={}, call_id={}, error={}]",
+                     remote_ip, call_id, err);
+        return makeHttpResponse(500, "Internal Server Error", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"status\":\"Accepted\",\"call_id\":" << call_id
+         << ",\"recording\":false,\"file_path\":\"" << jsonEscape(call->recordingFilePath())
+         << "\"}";
+    return makeHttpResponse(202, "Accepted", body.str(), "application/json");
+}
+
+std::string HttpServer::handleBridgeCalls(const std::string& json_body,
+                                          const std::string& admin_key,
+                                          const std::string& remote_ip, bool unbridge) const
+{
+    const auto& cfg = AppConfig::instance();
+    if (cfg.admin_api_key.empty()) {
+        return makeHttpResponse(503, "Service Unavailable",
+                                "{\"error\":\"admin_api_key_not_configured\"}", "application/json");
+    }
+    if (admin_key.empty()) {
+        return makeHttpResponse(401, "Unauthorized", "{\"error\":\"missing_admin_key\"}",
+                                "application/json");
+    }
+    if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
+        return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}",
+                                "application/json");
+    }
+
+    int call_a = PJSUA_INVALID_ID;
+    int call_b = PJSUA_INVALID_ID;
+    if (!parseJsonIntField(json_body, "call_a", &call_a) ||
+        !parseJsonIntField(json_body, "call_b", &call_b) || call_a < 0 || call_b < 0) {
+        return makeHttpResponse(
+            400, "Bad Request",
+            "{\"error\":\"invalid_request\",\"message\":\"call_a and call_b must be integers\"}",
+            "application/json");
+    }
+
+    auto a = SessionManager::getInstance().getCall(call_a);
+    auto b = SessionManager::getInstance().getCall(call_b);
+    if (!a || !b) {
+        return makeHttpResponse(404, "Not Found", "{\"error\":\"call_not_found\"}",
+                                "application/json");
+    }
+
+    std::string err;
+    const bool ok = unbridge ? a->unbridgeWith(b, &err) : a->bridgeWith(b, &err);
+    if (!ok) {
+        std::ostringstream body;
+        body << "{\"error\":\"bridge_failed\",\"message\":\""
+             << jsonEscape(err.empty() ? "unknown" : err) << "\"}";
+        spdlog::warn("[Audit][HTTP] {} failed [remote_ip={}, call_a={}, call_b={}, error={}]",
+                     unbridge ? "unbridge" : "bridge", remote_ip, call_a, call_b, err);
+        return makeHttpResponse(500, "Internal Server Error", body.str(), "application/json");
+    }
+
+    std::ostringstream body;
+    body << "{\"status\":\"Accepted\",\"action\":\"" << (unbridge ? "unbridge" : "bridge")
+         << "\",\"call_a\":" << call_a << ",\"call_b\":" << call_b << "}";
     return makeHttpResponse(202, "Accepted", body.str(), "application/json");
 }
 

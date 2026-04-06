@@ -242,6 +242,38 @@ ADMIN_API_KEY=changeme-admin-key ./scripts/soak_outbound_api.sh 100 10 sip:1001@
   - 강제 실패 모드: `REQUIRE_MEDIA=1 ./scripts/e2e_outbound_null_audio.sh config/.env.local`
   - 네트워크/바인딩 포함 강제 모드: `REQUIRE_MEDIA=1 REQUIRE_E2E=1 ./scripts/e2e_outbound_null_audio.sh config/.env.local`
 
+### 통화 제어 API 스모크
+
+`call_id`를 확보한 뒤(예: `/api/v1/calls` 응답), 아래 제어 API를 호출할 수 있습니다.
+
+```bash
+# DTMF (peer 전송)
+curl -s -X POST \
+  -H "X-Admin-Key: changeme-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"digits":"123#","target":"peer"}' \
+  http://127.0.0.1:8080/api/v1/calls/<CALL_ID>/dtmf
+
+# 블라인드 전환 (REFER)
+curl -s -X POST \
+  -H "X-Admin-Key: changeme-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"target_uri":"sip:1002@127.0.0.1"}' \
+  http://127.0.0.1:8080/api/v1/calls/<CALL_ID>/transfer
+
+# RTP/RTCP 통계 조회
+curl -s \
+  -H "X-Admin-Key: changeme-admin-key" \
+  http://127.0.0.1:8080/api/v1/calls/<CALL_ID>/stats
+
+# 2통화 브리지 연결
+curl -s -X POST \
+  -H "X-Admin-Key: changeme-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"call_a":101,"call_b":102}' \
+  http://127.0.0.1:8080/api/v1/calls/bridge
+```
+
 ### 운영 환경 설정 사전 검증
 
 ```bash

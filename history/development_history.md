@@ -7,6 +7,8 @@
 
 ## 2026-04-06
 
+- `[34ffa9c]` **feat: [Day-2] production hardening - RTP scaling, SBC trunking, and daily log rotation** — 2026-04-06 23:46 (5 파일, +93/-14)
+  - 변경: Dockerfile,docs/optimization_roadmap.md,history/development_history.md,src/main.cpp,src/utils/AppConfig.h
 - `[3354c2e]` **feat: 운영 안정성 강화 — PBX/SBC 연동 중심** — 2026-04-06 22:48 (35 파일, +2865/-194)
   - 변경: .dockerignore,.github/workflows/ci.yml,.github/workflows/e2e-outbound-null-audio.yml,AGENTS.md,CMakeLists.txt,Dockerfile,README.md,docs/slo_runbook.md,docs/testing.md,docs/troubleshooting.md
 ## 2026-03-29

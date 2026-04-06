@@ -60,6 +60,17 @@ public:
         return calls_.size();
     }
 
+    std::vector<std::shared_ptr<VoicebotCall>> getActiveCallsSnapshot()
+    {
+        std::vector<std::shared_ptr<VoicebotCall>> active_calls;
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_calls.reserve(calls_.size());
+        for (auto& pair : calls_) {
+            active_calls.push_back(pair.second);
+        }
+        return active_calls;
+    }
+
     // 데몬 종료 시 모든 활성 통화 일괄 종료 (Deadlock 방지 위해 복사 후 순회)
     void hangupAllCalls()
     {
@@ -108,6 +119,16 @@ public:
                 spdlog::debug("[SessionManager] endAiSession suppressed unknown error");
             }
         }
+    }
+
+    // [Shutdown Fix] 모든 콜 shared_ptr을 명시적으로 해제
+    // ep.shutdown() 전에 호출하여 VoicebotCall/VoicebotAiClient 소멸자가
+    // PJSIP가 아직 가용한 상태에서 안전하게 실행되도록 보장
+    void clearAllCalls()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spdlog::info("[SessionManager] Clearing {} call references...", calls_.size());
+        calls_.clear();
     }
 
 private:

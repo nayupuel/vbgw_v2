@@ -37,6 +37,14 @@ public:
     // [P-2 Fix] 포인터 오버로드 — 호출측 벡터 복사 없이 직접 전달
     void sendAudio(const uint8_t* data, size_t len, bool is_speaking);
 
+    // [IVR] DTMF 숫자를 AI 엔진으로 전달
+    // digit: 단일 문자 문자열 ("0"-"9", "*", "#")
+    // gRPC 스트림이 Streaming 상태가 아니면 드롭 + 경고
+    void sendDtmf(const std::string& digit);
+
+    // [IVR] 현재 스트림이 송신 가능한 상태인지 확인
+    bool isStreaming() const;
+
     // 세션 종료
     void endSession();
 
@@ -96,7 +104,10 @@ private:
     struct AudioItem
     {
         std::vector<uint8_t> pcm_data;
-        bool is_speaking;
+        bool is_speaking = false;
+        // [IVR] DTMF 전송 전용 필드. is_dtmf=true 이면 pcm_data/is_speaking 무시
+        bool is_dtmf = false;
+        std::string dtmf_digit;
     };
     std::queue<AudioItem> audio_queue_;
     std::mutex queue_mutex_;

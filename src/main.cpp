@@ -10,7 +10,9 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -26,6 +28,39 @@ std::atomic<bool> keep_running(true);
 void signalHandler(int /* signum */)
 {
     keep_running.store(false, std::memory_order_release);
+}
+
+static pjsua_100rel_use parsePrackMode(const std::string& mode_raw)
+{
+    std::string mode = mode_raw;
+    for (char& c : mode) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (mode == "mandatory") {
+        return PJSUA_100REL_MANDATORY;
+    }
+    if (mode == "optional") {
+        return PJSUA_100REL_OPTIONAL;
+    }
+    return PJSUA_100REL_NOT_USED;
+}
+
+static pjsua_sip_timer_use parseSessionTimerMode(const std::string& mode_raw)
+{
+    std::string mode = mode_raw;
+    for (char& c : mode) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (mode == "inactive") {
+        return PJSUA_SIP_TIMER_INACTIVE;
+    }
+    if (mode == "required") {
+        return PJSUA_SIP_TIMER_REQUIRED;
+    }
+    if (mode == "always") {
+        return PJSUA_SIP_TIMER_ALWAYS;
+    }
+    return PJSUA_SIP_TIMER_OPTIONAL;
 }
 
 int main()
@@ -100,13 +135,61 @@ int main()
 
     pj::AccountConfig acc_cfg;
 
-    // [CR-3 Fix] SRTP 활성화
+    // 멀티 트랜스포트 중 우선 전송계층 바인딩 (NAT/SIP outbound 안정화)
+    const auto preferred_tp = ep.preferredTransportId();
+    if (preferred_tp != PJSUA_INVALID_ID) {
+        acc_cfg.sipConfig.transportId = preferred_tp;
+    }
+
+    // NAT traversal 설정
+    acc_cfg.natConfig.contactRewriteUse =
+        cfg.sip_nat_contact_rewrite_enable ? cfg.sip_nat_contact_rewrite_mode : 0;
+    acc_cfg.natConfig.viaRewriteUse = cfg.sip_nat_via_rewrite_enable ? PJ_TRUE : PJ_FALSE;
+    acc_cfg.natConfig.sdpNatRewriteUse = cfg.sip_nat_sdp_rewrite_enable ? PJ_TRUE : PJ_FALSE;
+    acc_cfg.natConfig.sipOutboundUse = cfg.sip_nat_sip_outbound_enable ? PJ_TRUE : PJ_FALSE;
+    acc_cfg.natConfig.udpKaIntervalSec =
+        static_cast<unsigned>(std::max(0, cfg.sip_udp_keepalive_interval_secs));
+    acc_cfg.natConfig.sipStunUse =
+        cfg.sip_stun_sip_enable ? PJSUA_STUN_USE_DEFAULT : PJSUA_STUN_USE_DISABLED;
+    acc_cfg.natConfig.mediaStunUse =
+        cfg.sip_stun_media_enable ? PJSUA_STUN_USE_DEFAULT : PJSUA_STUN_USE_DISABLED;
+    acc_cfg.natConfig.iceEnabled = cfg.sip_ice_enable;
+    acc_cfg.natConfig.turnEnabled = cfg.sip_turn_enable;
+    if (cfg.sip_turn_enable) {
+        acc_cfg.natConfig.turnServer = cfg.sip_turn_server;
+        acc_cfg.natConfig.turnUserName = cfg.sip_turn_username;
+        acc_cfg.natConfig.turnPasswordType = 0;
+        acc_cfg.natConfig.turnPassword = cfg.sip_turn_password;
+        acc_cfg.natConfig.turnConnType = PJ_TURN_TP_UDP;
+    }
+
+    // PRACK + Session Timer 설정
+    acc_cfg.callConfig.prackUse = parsePrackMode(cfg.sip_prack_mode);
+    acc_cfg.callConfig.timerUse = parseSessionTimerMode(cfg.sip_session_timer_mode);
+    acc_cfg.callConfig.timerMinSESec = static_cast<unsigned>(cfg.sip_timer_min_se_secs);
+    acc_cfg.callConfig.timerSessExpiresSec = static_cast<unsigned>(cfg.sip_timer_sess_expires_secs);
+
+    // RTP/RTCP 운용 설정
+    acc_cfg.mediaConfig.streamKaEnabled = cfg.rtp_stream_keepalive_enable;
+    acc_cfg.mediaConfig.rtcpMuxEnabled = cfg.rtp_rtcp_mux_enable;
+    acc_cfg.mediaConfig.rtcpXrEnabled = cfg.rtp_rtcp_xr_enable;
+    if (cfg.rtp_rtcp_fb_nack_enable) {
+        pj::RtcpFbCap nack_cap;
+        nack_cap.codecId = "*";
+        nack_cap.type = PJMEDIA_RTCP_FB_NACK;
+        acc_cfg.mediaConfig.rtcpFbConfig.caps.push_back(nack_cap);
+    }
+
+    // [CR-3 + Sprint2] SRTP 활성화/강제화
     if (cfg.srtp_enable) {
-        acc_cfg.mediaConfig.srtpUse = PJMEDIA_SRTP_OPTIONAL;
-        acc_cfg.mediaConfig.srtpSecureSignaling = cfg.sip_use_tls ? 1 : 0;
-        spdlog::info("[VBGW] SRTP (Secure RTP) is ENABLED");
-        if (cfg.sip_use_tls) {
-            spdlog::info("       - SRTP requires Secure Signaling (SIP-TLS)");
+        const bool use_mandatory = cfg.srtp_mandatory || cfg.isProductionProfile();
+        acc_cfg.mediaConfig.srtpUse =
+            use_mandatory ? PJMEDIA_SRTP_MANDATORY : PJMEDIA_SRTP_OPTIONAL;
+        acc_cfg.mediaConfig.srtpSecureSignaling = cfg.sip_transport_tls_enable ? 1 : 0;
+
+        spdlog::info("[VBGW] SRTP is ENABLED ({})", use_mandatory ? "mandatory" : "optional");
+        if (cfg.sip_transport_tls_enable) {
+            spdlog::info("       - secure signaling policy: TLS");
         } else {
             spdlog::warn("       - SRTP over UDP (Not recommended for Production)");
         }
@@ -162,20 +245,97 @@ int main()
 
     spdlog::info("Press Ctrl+C to stop the gateway gracefully.");
 
+    // [P2-1 Fix] 녹음 파일 보관 주기 / 용량 관리 함수
+    auto cleanUpRecordings = [&cfg]() {
+        if (!cfg.call_recording_enable || cfg.call_recording_dir.empty())
+            return;
+
+        std::error_code ec;
+        if (!std::filesystem::exists(cfg.call_recording_dir, ec))
+            return;
+
+        try {
+            auto now = std::filesystem::file_time_type::clock::now();
+            auto max_age = std::chrono::hours(24 * cfg.call_recording_max_days);
+
+            // 파일 리스트 및 크기 수집
+            struct FileInfo
+            {
+                std::filesystem::path path;
+                std::filesystem::file_time_type last_write_time;
+                uintmax_t size;
+            };
+            std::vector<FileInfo> files;
+            uintmax_t total_size = 0;
+
+            for (const auto& entry : std::filesystem::directory_iterator(cfg.call_recording_dir)) {
+                if (entry.is_regular_file()) {
+                    auto lwt = entry.last_write_time();
+                    // 1. 기간(Days) 지난 파일 즉시 삭제
+                    if (now - lwt > max_age) {
+                        std::filesystem::remove(entry.path(), ec);
+                        spdlog::info("[Cleanup] Removed old recording: {}", entry.path().string());
+                    } else {
+                        uintmax_t size = entry.file_size(ec);
+                        files.push_back({entry.path(), lwt, size});
+                        total_size += size;
+                    }
+                }
+            }
+
+            // 2. 용량(MB) 초과 시 가장 오래된 파일부터 삭제
+            uintmax_t max_size_bytes =
+                static_cast<uintmax_t>(cfg.call_recording_max_mb) * 1024 * 1024;
+            if (total_size > max_size_bytes) {
+                // 오름차순 정렬 (오래된 것부터)
+                std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
+                    return a.last_write_time < b.last_write_time;
+                });
+
+                for (const auto& f : files) {
+                    if (total_size <= max_size_bytes)
+                        break;
+                    std::filesystem::remove(f.path, ec);
+                    total_size -= f.size;
+                    spdlog::info("[Cleanup] Removed recording due to quota ({}MB): {}",
+                                 cfg.call_recording_max_mb, f.path.string());
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[Cleanup] Recording cleanup error: {}", e.what());
+        }
+    };
+
     // 데몬 루프
+    auto last_clean_time = std::chrono::steady_clock::now();
+    // 시작 시 1회 실행
+    cleanUpRecordings();
+
     while (keep_running.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::hours>(now - last_clean_time).count() >= 1) {
+            cleanUpRecordings();
+            last_clean_time = now;
+        }
     }
 
-    // [R-3 Fix] 4단계 Graceful Shutdown 시퀀스
-    // PBX/SBC 연동 안정성을 위해 각 단계 완료를 보장하며 순차 진행
+    // [R-3 Fix] 5단계 Graceful Shutdown 시퀀스 (VAD-v5/Shutdown Fix)
+    // 객체 파괴 순서: HTTP → 콜 → AI세션 → SessionManager → Account → Endpoint
+    // 핵심 원칙: PJSIP ep.shutdown() 호출 전에 모든 PJSIP 종속 객체가 먼저 정리되어야 함
 
-    // 1단계: 진행 중인 모든 통화 강제 종료 (PBX에 BYE 전송)
-    spdlog::info("[Shutdown 1/4] Hanging up all active calls...");
+    // 1단계: HTTP Admin 즉시 중단 — 신규 Outbound Call 수신 차단
+    spdlog::info("[Shutdown 1/5] Stopping HTTP Admin Server...");
+    HttpServer::getInstance().stop();
+    HttpServer::getInstance().setAccount(nullptr);
+
+    // 2단계: 진행 중인 모든 통화 강제 종료 (PBX에 BYE 전송)
+    spdlog::info("[Shutdown 2/5] Hanging up all active calls...");
     SessionManager::getInstance().hangupAllCalls();
 
     // 네트워크 상으로 BYE 패킷이 안전하게 전송될 시간을 확보
-    int max_wait_ms = 5000;
+    int max_wait_ms = 3000;
     while (SessionManager::getInstance().getActiveCallCount() > 0 && max_wait_ms > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         max_wait_ms -= 100;
@@ -185,23 +345,24 @@ int main()
                      SessionManager::getInstance().getActiveCallCount());
     }
 
-    // 2단계: 모든 콜의 AI gRPC 세션 명시적 종료
-    // hangup→onCallState(DISCONNECTED) 체인이 타임아웃 내에 완료되지 않을 수 있으므로
-    // AI 스트림을 직접 정리하여 orphan gRPC 스트림 방지
-    spdlog::info("[Shutdown 2/4] Ending all AI sessions...");
+    // 3단계: 모든 콜의 AI gRPC 세션 명시적 종료
+    spdlog::info("[Shutdown 3/5] Ending all AI sessions...");
     SessionManager::getInstance().endAllAiSessions();
 
-    // 3단계: HTTP Admin 중단 (더 이상의 Outbound Call 수신 차단)
-    spdlog::info("[Shutdown 3/4] Stopping HTTP Admin Server...");
-    HttpServer::getInstance().stop();
-    HttpServer::getInstance().setAccount(nullptr);
+    // 4단계: SessionManager의 모든 콜 shared_ptr 해제
+    // — VoicebotCall/VoicebotAiClient 소멸자가 여기서 실행됨
+    // — PJSIP ep가 아직 살아있으므로 소멸자 내 PJSIP API 호출이 안전
+    spdlog::info("[Shutdown 4/5] Clearing all call references...");
+    SessionManager::getInstance().clearAllCalls();
 
-    // 4단계: 로컬 SIP 포트 닫기 및 PJSIP 엔진 완벽히 내리기
-    spdlog::info("[Shutdown 4/4] Shutting down SIP/PJLIB...");
+    // 5단계: PJSIP Account/Endpoint 종료
+    // acc의 소멸자가 main() 종료 시 호출되므로, ep.shutdown() 전에
+    // Account를 명시적으로 정리하여 소멸자-PJSIP 경합 방지
+    spdlog::info("[Shutdown 5/5] Shutting down SIP/PJLIB...");
     try {
-        acc.modify(acc_cfg);
-    } catch (pj::Error& err) {
-        spdlog::warn("[Shutdown] Account modify error (non-fatal): {}", err.info());
+        acc.shutdown();
+    } catch (...) {
+        // acc.shutdown()은 PJSIP 내부 에러를 발생시킬 수 있음 — 무시
     }
 
     ep.shutdown();

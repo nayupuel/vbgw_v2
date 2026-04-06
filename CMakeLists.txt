@@ -28,6 +28,10 @@ find_path(ONNXRUNTIME_INCLUDE_DIR
     REQUIRED)
 
 find_package(spdlog REQUIRED)
+find_library(SPEEXDSP_LIB
+    NAMES speexdsp
+    PATHS /opt/homebrew/lib /usr/local/lib /usr/lib
+    REQUIRED)
 
 find_program(PROTOC_EXECUTABLE protoc)
 find_program(GRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin)
@@ -60,6 +64,8 @@ add_library(vbgw_lib STATIC
     src/engine/VoicebotMediaPort.cpp
     src/ai/VoicebotAiClient.cpp
     src/ai/SileroVad.cpp
+    src/ai/SpeexDsp.cpp
+    src/ivr/IvrManager.cpp
     src/api/HttpServer.cpp
     ${PROTO_SRCS}
 )
@@ -96,6 +102,7 @@ target_link_libraries(vbgw_lib PUBLIC
     OpenSSL::SSL
     OpenSSL::Crypto
     ${ONNXRUNTIME_LIB}
+    ${SPEEXDSP_LIB}
     spdlog::spdlog
 )
 

@@ -30,9 +30,40 @@ public:
     int sip_port;
     bool sip_use_tls;
     bool srtp_enable;
+    bool srtp_mandatory;
     std::string sip_tls_cert_file;
     std::string sip_tls_privkey_file;
     std::string sip_tls_ca_file;
+    bool sip_transport_udp_enable;
+    bool sip_transport_tcp_enable;
+    bool sip_transport_tls_enable;
+    std::string sip_transport_preferred;
+
+    // ── NAT / Traversal 설정 ──
+    std::string sip_stun_server;
+    bool sip_stun_sip_enable;
+    bool sip_stun_media_enable;
+    bool sip_nat_contact_rewrite_enable;
+    int sip_nat_contact_rewrite_mode;
+    bool sip_nat_via_rewrite_enable;
+    bool sip_nat_sdp_rewrite_enable;
+    bool sip_nat_sip_outbound_enable;
+    int sip_udp_keepalive_interval_secs;
+    bool sip_ice_enable;
+    bool sip_turn_enable;
+    std::string sip_turn_server;
+    std::string sip_turn_username;
+    std::string sip_turn_password;
+
+    // ── SIP 세션 제어 설정 ──
+    std::string sip_prack_mode;          // off | optional | mandatory
+    std::string sip_session_timer_mode;  // inactive | optional | required | always
+    int sip_timer_min_se_secs;
+    int sip_timer_sess_expires_secs;
+    bool sip_follow_redirect;
+    bool sip_redirect_replace_to;
+    bool sip_accept_refer;
+    bool sip_accept_replaces;
 
     // ── PBX 설정 ──
     std::string pbx_uri;
@@ -63,6 +94,21 @@ public:
     // ── RTP 포트 범위 ──
     int rtp_port_min;
     int rtp_port_max;
+    bool rtp_stream_keepalive_enable;
+    bool rtp_rtcp_mux_enable;
+    bool rtp_rtcp_xr_enable;
+    bool rtp_rtcp_fb_nack_enable;
+
+    // ── Jitter Buffer 설정 ──
+    int jb_init_ms;     // 초기 지연 (ms). -1 = PJSIP 자동
+    int jb_min_pre_ms;  // 최소 선행 지연 (ms). -1 = 자동
+    int jb_max_pre_ms;  // 최대 선행 지연 (ms). -1 = 자동
+    int jb_max_ms;      // 최대 버퍼 크기 (ms). -1 = 자동
+
+    // ── SpeexDSP 설정 ──
+    bool speex_denoise_enable;  // 배경음 제거(Denoise) 활성화
+    bool speex_agc_enable;      // 자동 게인 제어(AGC) 활성화
+    int speex_agc_level;        // AGC 목표 레벨 (0~32768, 기본 16000)
 
     // ── 모니터링 / API 서버 ──
     int http_port;
@@ -80,6 +126,12 @@ public:
 
     // ── 런타임 프로파일 ──
     std::string runtime_profile;
+
+    // ── 통화 모니터링/녹취 설정 ──
+    bool call_recording_enable;
+    std::string call_recording_dir;
+    int call_recording_max_days;  // [P2-1 Fix] 오래된 녹음 파일 보관 일수
+    int call_recording_max_mb;    // [P2-1 Fix] 녹음 디렉토리 최대 용량(MB)
 
     // [CR-1 Fix] gRPC 채널을 싱글톤으로 공유
     // TCP 연결 + HTTP/2 핸드셰이크 + TLS 협상을 1회만 수행
@@ -105,14 +157,18 @@ public:
         std::vector<std::string> local_errors;
 
         if (isProductionProfile()) {
-            if (!sip_use_tls) {
-                local_errors.emplace_back("SIP_USE_TLS must be enabled in production profile.");
+            if (!sip_transport_tls_enable) {
+                local_errors.emplace_back("SIP transport TLS must be enabled in production profile "
+                                          "(SIP_TRANSPORT_TLS_ENABLE=1 or SIP_USE_TLS=1).");
             }
             if (!grpc_use_tls) {
                 local_errors.emplace_back("GRPC_USE_TLS must be enabled in production profile.");
             }
             if (!srtp_enable) {
                 local_errors.emplace_back("SRTP_ENABLE must be enabled in production profile.");
+            }
+            if (!srtp_mandatory) {
+                local_errors.emplace_back("SRTP_MANDATORY must be enabled in production profile.");
             }
 
             validateFileForProd(sip_tls_cert_file, "SIP_TLS_CERT_FILE", local_errors);
@@ -151,6 +207,25 @@ public:
                 local_errors.emplace_back(
                     "SIP_PORT and HTTP_PORT must not be the same in production profile.");
             }
+
+            if ((sip_ice_enable || sip_turn_enable ||
+                 (sip_stun_sip_enable || sip_stun_media_enable)) &&
+                sip_stun_server.empty() && !sip_turn_enable) {
+                local_errors.emplace_back(
+                    "NAT traversal is enabled but SIP_STUN_SERVER is empty and TURN is disabled.");
+            }
+
+            if (sip_turn_enable) {
+                if (sip_turn_server.empty()) {
+                    local_errors.emplace_back(
+                        "SIP_TURN_SERVER is required when SIP_TURN_ENABLE=1.");
+                }
+                if (sip_turn_username.empty() || sip_turn_password.empty()) {
+                    local_errors.emplace_back(
+                        "SIP_TURN_USERNAME and SIP_TURN_PASSWORD are required when "
+                        "SIP_TURN_ENABLE=1.");
+                }
+            }
         }
 
         if (errors) {
@@ -169,9 +244,53 @@ private:
         sip_port = readInt("SIP_PORT", 5060, 1, 65535);
         sip_use_tls = readBool("SIP_USE_TLS", false);
         srtp_enable = readBool("SRTP_ENABLE", false);
+        srtp_mandatory = readBool("SRTP_MANDATORY", false);
         sip_tls_cert_file = readStr("SIP_TLS_CERT_FILE", "");
         sip_tls_privkey_file = readStr("SIP_TLS_PRIVKEY_FILE", "");
         sip_tls_ca_file = readStr("SIP_TLS_CA_FILE", "");
+        sip_transport_udp_enable = readBool("SIP_TRANSPORT_UDP_ENABLE", true);
+        sip_transport_tcp_enable = readBool("SIP_TRANSPORT_TCP_ENABLE", false);
+        sip_transport_tls_enable = readBool("SIP_TRANSPORT_TLS_ENABLE", sip_use_tls);
+        sip_transport_preferred =
+            readStr("SIP_TRANSPORT_PREFERRED", sip_transport_tls_enable ? "tls" : "udp");
+
+        // ── NAT / Traversal ──
+        sip_stun_server = readStr("SIP_STUN_SERVER", "");
+        sip_stun_sip_enable = readBool("SIP_STUN_SIP_ENABLE", false);
+        sip_stun_media_enable = readBool("SIP_STUN_MEDIA_ENABLE", false);
+        sip_nat_contact_rewrite_enable = readBool("SIP_NAT_CONTACT_REWRITE_ENABLE", true);
+        sip_nat_contact_rewrite_mode = readInt("SIP_NAT_CONTACT_REWRITE_MODE", 1, 0, 2);
+        sip_nat_via_rewrite_enable = readBool("SIP_NAT_VIA_REWRITE_ENABLE", true);
+        sip_nat_sdp_rewrite_enable = readBool("SIP_NAT_SDP_REWRITE_ENABLE", false);
+        sip_nat_sip_outbound_enable = readBool("SIP_NAT_SIP_OUTBOUND_ENABLE", true);
+        sip_udp_keepalive_interval_secs = readInt("SIP_UDP_KEEPALIVE_INTERVAL_SECS", 15, 0, 3600);
+        sip_ice_enable = readBool("SIP_ICE_ENABLE", false);
+        sip_turn_enable = readBool("SIP_TURN_ENABLE", false);
+        sip_turn_server = readStr("SIP_TURN_SERVER", "");
+        sip_turn_username = readStr("SIP_TURN_USERNAME", "");
+        sip_turn_password = readStr("SIP_TURN_PASSWORD", "");
+
+        // ── SIP Session Controls ──
+        sip_prack_mode = readStr("SIP_PRACK_MODE", "off");
+        sip_session_timer_mode = readStr("SIP_SESSION_TIMER_MODE", "optional");
+        sip_timer_min_se_secs = readInt("SIP_TIMER_MIN_SE_SECS", 90, 90, 7200);
+        sip_timer_sess_expires_secs = readInt("SIP_TIMER_SESS_EXPIRES_SECS", 1800, 90, 86400);
+        sip_follow_redirect = readBool("SIP_FOLLOW_REDIRECT", true);
+        sip_redirect_replace_to = readBool("SIP_REDIRECT_REPLACE_TO", false);
+        sip_accept_refer = readBool("SIP_ACCEPT_REFER", true);
+        sip_accept_replaces = readBool("SIP_ACCEPT_REPLACES", true);
+
+        if (!sip_transport_udp_enable && !sip_transport_tcp_enable && !sip_transport_tls_enable) {
+            spdlog::warn("[Config] All SIP transports disabled — forcing UDP enable");
+            sip_transport_udp_enable = true;
+        }
+
+        if (sip_timer_sess_expires_secs < sip_timer_min_se_secs) {
+            spdlog::warn("[Config] SIP_TIMER_SESS_EXPIRES_SECS({}) < SIP_TIMER_MIN_SE_SECS({}) "
+                         "— clamping",
+                         sip_timer_sess_expires_secs, sip_timer_min_se_secs);
+            sip_timer_sess_expires_secs = sip_timer_min_se_secs;
+        }
 
         // ── PBX ──
         pbx_uri = readStr("PBX_URI", "");
@@ -206,11 +325,39 @@ private:
         // ── RTP Port Range ──
         rtp_port_min = readInt("RTP_PORT_MIN", 16000, 1024, 65535);
         rtp_port_max = readInt("RTP_PORT_MAX", 20000, 1024, 65535);
+        rtp_stream_keepalive_enable = readBool("RTP_STREAM_KEEPALIVE_ENABLE", true);
+        rtp_rtcp_mux_enable = readBool("RTP_RTCP_MUX_ENABLE", false);
+        rtp_rtcp_xr_enable = readBool("RTP_RTCP_XR_ENABLE", true);
+        rtp_rtcp_fb_nack_enable = readBool("RTP_RTCP_FB_NACK_ENABLE", false);
         if (rtp_port_max < rtp_port_min) {
             spdlog::warn("[Config] RTP_PORT_MAX({}) < RTP_PORT_MIN({}) — swapping", rtp_port_max,
                          rtp_port_min);
             std::swap(rtp_port_min, rtp_port_max);
         }
+
+        // ── Jitter Buffer ──
+        // 단위: 모두 밀리초(ms). -1 → PJSIP 자동 선택
+        // 권장값: 네트워크 RTT 기반으로 jbMinPre ≤ jbInit ≤ jbMaxPre ≤ jbMax
+        jb_init_ms = readInt("JB_INIT_MS", 100, -1, 2000);
+        jb_min_pre_ms = readInt("JB_MIN_PRE_MS", 60, -1, 2000);
+        jb_max_pre_ms = readInt("JB_MAX_PRE_MS", 240, -1, 2000);
+        jb_max_ms = readInt("JB_MAX_MS", 500, -1, 4000);
+        // 범위 검증: min_pre ≤ max_pre ≤ max
+        if (jb_max_pre_ms >= 0 && jb_min_pre_ms >= 0 && jb_max_pre_ms < jb_min_pre_ms) {
+            spdlog::warn("[Config] JB_MAX_PRE_MS({}) < JB_MIN_PRE_MS({}) — swapping", jb_max_pre_ms,
+                         jb_min_pre_ms);
+            std::swap(jb_min_pre_ms, jb_max_pre_ms);
+        }
+        if (jb_max_ms >= 0 && jb_max_pre_ms >= 0 && jb_max_ms < jb_max_pre_ms) {
+            spdlog::warn("[Config] JB_MAX_MS({}) < JB_MAX_PRE_MS({}) — clamping", jb_max_ms,
+                         jb_max_pre_ms);
+            jb_max_ms = jb_max_pre_ms;
+        }
+
+        // ── SpeexDSP ──
+        speex_denoise_enable = readBool("SPEEX_DENOISE_ENABLE", true);
+        speex_agc_enable = readBool("SPEEX_AGC_ENABLE", true);
+        speex_agc_level = readInt("SPEEX_AGC_LEVEL", 16000, 0, 32768);
 
         // ── Logging ──
         log_level = readStr("LOG_LEVEL", "info");
@@ -228,6 +375,12 @@ private:
 
         // ── Runtime Profile ──
         runtime_profile = readStr("VBGW_PROFILE", "dev");
+
+        // ── Recording ──
+        call_recording_enable = readBool("CALL_RECORDING_ENABLE", false);
+        call_recording_dir = readStr("CALL_RECORDING_DIR", "recordings");
+        call_recording_max_days = readInt("CALL_RECORDING_MAX_DAYS", 30, 1, 3650);
+        call_recording_max_mb = readInt("CALL_RECORDING_MAX_MB", 1024, 10, 1048576);  // 기본 1GB
     }
 
     ~AppConfig() = default;

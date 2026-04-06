@@ -18,8 +18,20 @@ VoicebotAccount::VoicebotAccount() {}
 
 VoicebotAccount::~VoicebotAccount()
 {
-    // [L-1 Fix] 소멸자에서 mutex를 잡은 채 wait() → deadlock 가능성 제거
-    // futures를 swap으로 꺼낸 뒤 mutex 해제 후 wait
+    // [Shutdown Fix] shutdown()이 이미 호출되었으면 스킵 — 이중 정리 방지
+    if (!shutdown_called_) {
+        shutdown();
+    }
+}
+
+void VoicebotAccount::shutdown()
+{
+    if (shutdown_called_) {
+        return;
+    }
+    shutdown_called_ = true;
+
+    // [L-1 Fix] futures를 swap으로 꺼낸 뒤 mutex 해제 후 wait — deadlock 방지
     std::vector<std::future<void>> pending;
     {
         std::lock_guard<std::mutex> lock(futures_mutex_);
@@ -30,6 +42,8 @@ VoicebotAccount::~VoicebotAccount()
             f.wait();
         }
     }
+
+    spdlog::info("[Account] Shutdown complete — {} pending futures waited.", pending.size());
 }
 
 void VoicebotAccount::onRegState(OnRegStateParam& prm)

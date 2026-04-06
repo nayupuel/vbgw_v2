@@ -55,6 +55,20 @@ private:
     std::string handleMetrics() const;
     std::string handleOutboundCall(const std::string& json_body, const std::string& admin_key,
                                    const std::string& remote_ip) const;
+    std::string handleCallDtmf(int call_id, const std::string& json_body,
+                               const std::string& admin_key, const std::string& remote_ip) const;
+    std::string handleCallTransfer(int call_id, const std::string& json_body,
+                                   const std::string& admin_key,
+                                   const std::string& remote_ip) const;
+    std::string handleCallStats(int call_id, const std::string& admin_key,
+                                const std::string& remote_ip) const;
+    std::string handleCallRecordStart(int call_id, const std::string& json_body,
+                                      const std::string& admin_key,
+                                      const std::string& remote_ip) const;
+    std::string handleCallRecordStop(int call_id, const std::string& admin_key,
+                                     const std::string& remote_ip) const;
+    std::string handleBridgeCalls(const std::string& json_body, const std::string& admin_key,
+                                  const std::string& remote_ip, bool unbridge) const;
     std::string makeHttpResponse(
         int status_code, const std::string& status_text, const std::string& body,
         const std::string& content_type,

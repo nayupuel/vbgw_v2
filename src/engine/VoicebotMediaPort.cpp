@@ -1,6 +1,7 @@
 #include "VoicebotMediaPort.h"
 
 #include "../ai/SileroVad.h"
+#include "../ai/SpeexDsp.h"
 #include "../ai/VoicebotAiClient.h"
 #include "../utils/AppConfig.h"
 #include "../utils/RingBuffer.h"
@@ -15,8 +16,14 @@ VoicebotMediaPort::VoicebotMediaPort()
       // 16kHz × 2bytes(16bit) × N초 = 32000 × N bytes
       tts_buffer_(std::make_unique<RingBuffer>(static_cast<size_t>(32000) *
                                                AppConfig::instance().tts_buffer_secs)),
-      vad_(std::make_unique<SileroVad>())
+      vad_(std::make_unique<SileroVad>()),
+      // [SpeexDSP] 16kHz 20ms = 320 샘플 고정 프레임으로 초기화
+      speex_dsp_(std::make_unique<SpeexDsp>(16000, 320))
 {
+    const auto& cfg = AppConfig::instance();
+    speex_dsp_->setDenoiseEnabled(cfg.speex_denoise_enable);
+    speex_dsp_->setAgcEnabled(cfg.speex_agc_enable);
+    speex_dsp_->setAgcLevel(cfg.speex_agc_level);
     // AI 모델(STT/TTS)을 위해 16kHz, 1채널 16비트 PCM (20ms) 코덱 포맷 설정
     pj::MediaFormatAudio fmt;
     fmt.type = PJMEDIA_TYPE_AUDIO;
@@ -45,8 +52,18 @@ void VoicebotMediaPort::setVadSpeechStartCallback(std::function<void()> cb)
     on_vad_speech_start_ = std::move(cb);
 }
 
+void VoicebotMediaPort::setAiPaused(bool paused)
+{
+    ai_paused_.store(paused, std::memory_order_release);
+    spdlog::info("[MediaPort] AI stream forwarding {}", paused ? "PAUSED" : "RESUMED");
+}
+
 void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 {
+    if (ai_paused_.load(std::memory_order_acquire)) {
+        return;  // Bridge 상태 등 AI 개입 차단 모드
+    }
+
     std::shared_ptr<VoicebotAiClient> safe_client;
     {
         std::lock_guard<std::mutex> lock(client_mutex_);
@@ -58,8 +75,15 @@ void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
         const size_t safe_size = frame.size & ~static_cast<size_t>(1);
         if (safe_size == 0)
             return;
-        const int16_t* pcm16 = reinterpret_cast<const int16_t*>(frame.buf.data());
+        // [SpeexDSP] in-place 처리를 위해 mutable 포인터 사용
+        int16_t* pcm16 = reinterpret_cast<int16_t*>(frame.buf.data());
         size_t samples = safe_size / 2;
+
+        // [SpeexDSP] Denoise + AGC — VAD/STT 전에 적용하여 잡음 제거 후 음성 감지
+        // 처리 순서: RTP수신 → SpeexDSP(Denoise+AGC) → SileroVAD → gRPC STT
+        if (speex_dsp_) {
+            speex_dsp_->process(pcm16, samples);
+        }
 
         bool is_speaking = vad_->isSpeaking(pcm16, samples);
         if (is_speaking && !last_vad_state_ && on_vad_speech_start_) {

@@ -179,10 +179,49 @@ void VoicebotAiClient::sendAudio(const uint8_t* data, size_t len, bool is_speaki
             return;
         }
 
-        audio_queue_.push({std::vector<uint8_t>(data, data + len), is_speaking});
+        AudioItem item;
+        item.pcm_data = std::vector<uint8_t>(data, data + len);
+        item.is_speaking = is_speaking;
+        audio_queue_.push(std::move(item));
         RuntimeMetrics::instance().addGrpcQueuedFrames(1);
     }
     queue_cv_.notify_one();
+}
+
+bool VoicebotAiClient::isStreaming() const
+{
+    return state_.load(std::memory_order_acquire) == StreamState::Streaming;
+}
+
+void VoicebotAiClient::sendDtmf(const std::string& digit)
+{
+    if (digit.empty() || digit.size() > 1) {
+        spdlog::warn("[gRPC] sendDtmf: invalid digit '{}' — expected single char", digit);
+        return;
+    }
+
+    if (!is_running_.load(std::memory_order_acquire)) {
+        spdlog::warn("[gRPC] sendDtmf: session not running — dropping digit '{}'", digit);
+        return;
+    }
+
+    // 스트림 상태 사전 검증 — Streaming 상태가 아니면 드롭
+    if (!isStreaming()) {
+        spdlog::warn("[gRPC] sendDtmf: stream in state '{}', not Streaming — dropping digit '{}'",
+                     streamStateName(state_.load()), digit);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        AudioItem item;
+        item.is_dtmf = true;
+        item.dtmf_digit = digit;
+        audio_queue_.push(std::move(item));
+        RuntimeMetrics::instance().addGrpcQueuedFrames(1);
+    }
+    queue_cv_.notify_one();
+    spdlog::info("[gRPC] DTMF '{}' queued for session: {}", digit, current_session_id_);
 }
 
 void VoicebotAiClient::streamWorker()
@@ -212,8 +251,17 @@ void VoicebotAiClient::streamWorker()
         if (local_stream) {
             AudioChunk chunk;
             chunk.set_session_id(current_session_id_);
-            chunk.set_audio_data(item.pcm_data.data(), item.pcm_data.size());
-            chunk.set_is_speaking(item.is_speaking);
+
+            if (item.is_dtmf) {
+                // [IVR] DTMF 전용 청크 — audio_data/is_speaking 미설정
+                chunk.set_dtmf_digit(item.dtmf_digit);
+                spdlog::debug("[gRPC] Sending DTMF '{}' for session: {}", item.dtmf_digit,
+                              current_session_id_);
+            } else {
+                // 일반 오디오 프레임
+                chunk.set_audio_data(item.pcm_data.data(), item.pcm_data.size());
+                chunk.set_is_speaking(item.is_speaking);
+            }
 
             if (!local_stream->Write(chunk)) {
                 spdlog::warn("[gRPC] Stream write failed for session: {}. Triggering reconnect.",

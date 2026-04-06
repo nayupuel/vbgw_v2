@@ -16,6 +16,7 @@ message AudioChunk {
     string session_id = 1;     // SIP Call ID
     bytes audio_data = 2;      // 16kHz PCM 바이너리 (20ms)
     bool is_speaking = 3;      // VAD 감지 상태 (True: 고객이 말하는 중)
+    string dtmf_digit = 4;     // [IVR] DTMF 단일 문자 ('0'-'9', '*', '#'). 비어 있으면 음성 프레임
 }
 
 // 2. AI Engine -> Gateway (STT 텍스트 결과 또는 TTS 음성을 전달)
