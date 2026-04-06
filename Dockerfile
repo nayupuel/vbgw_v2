@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libspeexdsp1 \
     libssl3 \
     libspdlog1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # [보안] non-root 사용자로 실행
@@ -68,9 +69,10 @@ EXPOSE 5060/udp
 # RTP 미디어 포트 범위 (필요 시 조정)
 EXPOSE 16000-16100/udp
 
-# 헬스체크: 프로세스 생존 확인 (5초 간격, 3회 실패 시 unhealthy)
+# [S-4 Fix] HTTP 기반 헬스체크로 변경 — 프로세스 좀비/교착 상태도 감지
+# pgrep은 프로세스 존재만 확인하여 deadlock 상태를 놓칠 수 있음
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=3 \
-    CMD pgrep -x vbgw > /dev/null || exit 1
+    CMD curl -sf http://localhost:8080/live || exit 1
 
 # [C-1 Fix] GRPC_USE_TLS 기본값 0 — 개발/테스트 전용
 # ⚠️  WARNING: 운영(Production) 환경에서는 반드시 GRPC_USE_TLS=1 로 재설정하세요.
@@ -84,7 +86,9 @@ ENV LOG_LEVEL=info \
     RTP_PORT_MAX=16100 \
     AI_ENGINE_ADDR=localhost:50051 \
     GRPC_USE_TLS=0 \
-    GRPC_STREAM_DEADLINE_SECS=3600 \
+    GRPC_STREAM_DEADLINE_SECS=86400 \
+    GRPC_MAX_RECONNECT_RETRIES=5 \
+    GRPC_MAX_BACKOFF_MS=4000 \
     MAX_CONCURRENT_CALLS=100 \
     ANSWER_DELAY_MS=200 \
     TTS_BUFFER_SECS=5 \

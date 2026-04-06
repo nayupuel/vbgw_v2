@@ -208,3 +208,48 @@ LOG_LEVEL=trace ./build/vbgw
 
 ### macOS 마이크 권한 오류
 - **시스템 환경설정 → 보안 및 개인 정보 보호 → 마이크** 에서 Terminal 권한 허용
+
+---
+
+## Sprint 2 추가 검증
+
+### Outbound Control-plane 부하 검증
+
+vbgw 실행 후, 별도 터미널에서:
+
+```bash
+ADMIN_API_KEY=changeme-admin-key ./scripts/soak_outbound_api.sh 100 10 sip:1001@127.0.0.1 http://127.0.0.1:8080
+```
+
+- 기대 결과: `202 Accepted` 비율이 높고, `5xx`가 없어야 함
+- 관측 지표: `/metrics`의 `vbgw_grpc_queued_frames`, `vbgw_grpc_dropped_frames_total`
+
+### Outbound API 실제 콜 E2E (Null Audio)
+
+로컬에서 통화 장치 없이 Outbound 콜을 재현합니다.
+
+```bash
+./scripts/e2e_outbound_null_audio.sh config/.env.local
+```
+
+- 내부 동작:
+  - `mock_server.py` 시작 (gRPC AI)
+  - `vbgw` 시작 (`PJSIP_NULL_AUDIO=1`)
+  - `pjsua` callee 시작 (`--null-audio --auto-answer=200`)
+  - `/api/v1/calls` 호출 후 `call_id` 및 상태 전이 확인
+- 참고:
+  - 샌드박스/오디오 제한 환경에서는 `PJMEDIA_EAUD_INIT`로 `SKIP`될 수 있습니다.
+  - 강제 실패 모드: `REQUIRE_MEDIA=1 ./scripts/e2e_outbound_null_audio.sh config/.env.local`
+  - 네트워크/바인딩 포함 강제 모드: `REQUIRE_MEDIA=1 REQUIRE_E2E=1 ./scripts/e2e_outbound_null_audio.sh config/.env.local`
+
+### 운영 환경 설정 사전 검증
+
+```bash
+./scripts/validate_prod_env.sh .env
+```
+
+- 기대 결과: `PASS: production env validation succeeded.`
+- 운영 게이트(프로파일 강제) 권장:
+  ```bash
+  VALIDATE_PROFILE=production REQUIRE_PRODUCTION_PROFILE=1 ./scripts/validate_prod_env.sh .env
+  ```

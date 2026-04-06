@@ -3,12 +3,16 @@
 #include <grpcpp/security/credentials.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 // [CR-1 + H-6 Fix] 환경변수를 프로세스 시작 시 1회 읽어 캐싱하는 싱글톤
 // getenv()는 스레드-세이프하지 않은 구현이 존재하며, 매 콜 경로에서 반복 호출 방지
@@ -44,6 +48,8 @@ public:
     std::string grpc_tls_client_cert;
     std::string grpc_tls_client_key;
     int grpc_stream_deadline_secs;
+    int grpc_max_reconnect_retries;
+    int grpc_max_backoff_ms;
 
     // ── VAD 설정 ──
     std::string silero_vad_model_path;
@@ -59,11 +65,20 @@ public:
 
     // ── 모니터링 / API 서버 ──
     int http_port;
+    std::string admin_api_key;
+    int admin_api_rate_limit_rps;
+    int admin_api_rate_limit_burst;
+    int admin_api_max_body_bytes;
+    int admin_api_max_header_bytes;
 
     // ── 로깅 설정 ──
     std::string log_level;
     std::string log_dir;
     int pjsip_log_level;
+    bool pjsip_null_audio;
+
+    // ── 런타임 프로파일 ──
+    std::string runtime_profile;
 
     // [CR-1 Fix] gRPC 채널을 싱글톤으로 공유
     // TCP 연결 + HTTP/2 핸드셰이크 + TLS 협상을 1회만 수행
@@ -74,6 +89,73 @@ public:
             grpc_channel_ = createGrpcChannel();
         }
         return grpc_channel_;
+    }
+
+    bool isProductionProfile() const
+    {
+        auto profile = runtime_profile;
+        std::transform(profile.begin(), profile.end(), profile.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return profile == "prod" || profile == "production";
+    }
+
+    bool validateRuntimeSecurityPolicy(std::vector<std::string>* errors = nullptr) const
+    {
+        std::vector<std::string> local_errors;
+
+        if (isProductionProfile()) {
+            if (!sip_use_tls) {
+                local_errors.emplace_back("SIP_USE_TLS must be enabled in production profile.");
+            }
+            if (!grpc_use_tls) {
+                local_errors.emplace_back("GRPC_USE_TLS must be enabled in production profile.");
+            }
+            if (!srtp_enable) {
+                local_errors.emplace_back("SRTP_ENABLE must be enabled in production profile.");
+            }
+
+            validateFileForProd(sip_tls_cert_file, "SIP_TLS_CERT_FILE", local_errors);
+            validateFileForProd(sip_tls_privkey_file, "SIP_TLS_PRIVKEY_FILE", local_errors);
+            validateFileForProd(sip_tls_ca_file, "SIP_TLS_CA_FILE", local_errors);
+            validateFileForProd(grpc_tls_ca_cert, "GRPC_TLS_CA_CERT", local_errors);
+            validateFileForProd(grpc_tls_client_cert, "GRPC_TLS_CLIENT_CERT", local_errors);
+            validateFileForProd(grpc_tls_client_key, "GRPC_TLS_CLIENT_KEY", local_errors);
+
+            if (!isStrongAdminApiKey(admin_api_key)) {
+                local_errors.emplace_back(
+                    "ADMIN_API_KEY must be strong (>=16 chars, upper/lower/digit/symbol, "
+                    "non-default) in production profile.");
+            }
+
+            if (pjsip_null_audio) {
+                local_errors.emplace_back(
+                    "PJSIP_NULL_AUDIO must be disabled in production profile.");
+            }
+
+            validateIntRangeForProd(admin_api_rate_limit_rps, 1, 10000, "ADMIN_API_RATE_LIMIT_RPS",
+                                    local_errors);
+            validateIntRangeForProd(admin_api_rate_limit_burst, 1, 100000,
+                                    "ADMIN_API_RATE_LIMIT_BURST", local_errors);
+            validateIntRangeForProd(admin_api_max_body_bytes, 256, 1024 * 1024,
+                                    "ADMIN_API_MAX_BODY_BYTES", local_errors);
+            validateIntRangeForProd(admin_api_max_header_bytes, 1024, 256 * 1024,
+                                    "ADMIN_API_MAX_HEADER_BYTES", local_errors);
+
+            if (admin_api_rate_limit_burst < admin_api_rate_limit_rps) {
+                local_errors.emplace_back("ADMIN_API_RATE_LIMIT_BURST must be >= "
+                                          "ADMIN_API_RATE_LIMIT_RPS in production profile.");
+            }
+
+            if (sip_port == http_port) {
+                local_errors.emplace_back(
+                    "SIP_PORT and HTTP_PORT must not be the same in production profile.");
+            }
+        }
+
+        if (errors) {
+            errors->insert(errors->end(), local_errors.begin(), local_errors.end());
+        }
+        return local_errors.empty();
     }
 
 private:
@@ -104,7 +186,9 @@ private:
         grpc_tls_ca_cert = readStr("GRPC_TLS_CA_CERT", "");
         grpc_tls_client_cert = readStr("GRPC_TLS_CLIENT_CERT", "");
         grpc_tls_client_key = readStr("GRPC_TLS_CLIENT_KEY", "");
-        grpc_stream_deadline_secs = readInt("GRPC_STREAM_DEADLINE_SECS", 3600, 1, 86400);
+        grpc_stream_deadline_secs = readInt("GRPC_STREAM_DEADLINE_SECS", 86400, 1, 86400);
+        grpc_max_reconnect_retries = readInt("GRPC_MAX_RECONNECT_RETRIES", 5, 1, 100);
+        grpc_max_backoff_ms = readInt("GRPC_MAX_BACKOFF_MS", 4000, 500, 60000);
 
         // ── AI Engine address validation ──
         validateAiAddr();
@@ -130,9 +214,18 @@ private:
         log_level = readStr("LOG_LEVEL", "info");
         log_dir = readStr("LOG_DIR", "");
         pjsip_log_level = readInt("PJSIP_LOG_LEVEL", 3, 0, 6);
+        pjsip_null_audio = readBool("PJSIP_NULL_AUDIO", false);
 
         // ── API Server ──
         http_port = readInt("HTTP_PORT", 8080, 1, 65535);
+        admin_api_key = readStr("ADMIN_API_KEY", "changeme-admin-key");
+        admin_api_rate_limit_rps = readInt("ADMIN_API_RATE_LIMIT_RPS", 20, 1, 10000);
+        admin_api_rate_limit_burst = readInt("ADMIN_API_RATE_LIMIT_BURST", 40, 1, 100000);
+        admin_api_max_body_bytes = readInt("ADMIN_API_MAX_BODY_BYTES", 8192, 256, 1024 * 1024);
+        admin_api_max_header_bytes = readInt("ADMIN_API_MAX_HEADER_BYTES", 16384, 1024, 256 * 1024);
+
+        // ── Runtime Profile ──
+        runtime_profile = readStr("VBGW_PROFILE", "dev");
     }
 
     ~AppConfig() = default;
@@ -171,7 +264,11 @@ private:
         const char* val = std::getenv(name);
         if (!val || !*val)
             return def;
-        return std::string(val) == "1" || std::string(val) == "true";
+        std::string normalized(val);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return normalized == "1" || normalized == "true" || normalized == "yes" ||
+               normalized == "on";
     }
 
     void validateAiAddr() const
@@ -237,5 +334,53 @@ private:
         std::ostringstream ss;
         ss << f.rdbuf();
         return ss.str();
+    }
+
+    static void validateFileForProd(const std::string& path, const char* name,
+                                    std::vector<std::string>& errors)
+    {
+        if (path.empty()) {
+            errors.emplace_back(std::string(name) + " is required in production profile.");
+            return;
+        }
+        if (!std::filesystem::exists(path)) {
+            errors.emplace_back(std::string(name) + " path does not exist: " + path);
+        }
+    }
+
+    static bool isStrongAdminApiKey(const std::string& key)
+    {
+        if (key.empty() || key == "changeme-admin-key" || key.size() < 16) {
+            return false;
+        }
+
+        bool has_upper = false;
+        bool has_lower = false;
+        bool has_digit = false;
+        bool has_symbol = false;
+
+        for (unsigned char c : key) {
+            if (std::isupper(c)) {
+                has_upper = true;
+            } else if (std::islower(c)) {
+                has_lower = true;
+            } else if (std::isdigit(c)) {
+                has_digit = true;
+            } else {
+                has_symbol = true;
+            }
+        }
+        return has_upper && has_lower && has_digit && has_symbol;
+    }
+
+    static void validateIntRangeForProd(int value, int min_val, int max_val, const char* name,
+                                        std::vector<std::string>& errors)
+    {
+        if (value < min_val || value > max_val) {
+            std::ostringstream msg;
+            msg << name << " must be in range [" << min_val << "," << max_val
+                << "] in production profile.";
+            errors.emplace_back(msg.str());
+        }
     }
 };

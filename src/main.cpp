@@ -3,6 +3,7 @@
 #include "engine/VoicebotAccount.h"
 #include "engine/VoicebotEndpoint.h"
 #include "utils/AppConfig.h"
+#include "utils/RuntimeMetrics.h"
 
 #include <spdlog/sinks/daily_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -15,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <thread>
+#include <vector>
 
 // 전역 종료 플래그 (SIGINT 등 인터럽트 기반 안전 종료 대기용)
 std::atomic<bool> keep_running(true);
@@ -63,8 +65,18 @@ int main()
     logger->set_level(log_level);
     spdlog::set_default_logger(logger);
 
-    spdlog::info("Starting AI Voicebot Gateway (PJSUA2)... [log_level={}{}]", cfg.log_level,
+    spdlog::info("Starting AI Voicebot Gateway (PJSUA2)... [profile={}, log_level={}{}]",
+                 cfg.runtime_profile, cfg.log_level,
                  cfg.log_dir.empty() ? "" : std::string(", log_dir=") + cfg.log_dir);
+
+    std::vector<std::string> security_errors;
+    if (!cfg.validateRuntimeSecurityPolicy(&security_errors)) {
+        spdlog::critical("[Security] Runtime security policy validation failed:");
+        for (const auto& err : security_errors) {
+            spdlog::critical("  - {}", err);
+        }
+        return 2;
+    }
 
     VoicebotEndpoint ep;
     if (!ep.init()) {
@@ -100,6 +112,8 @@ int main()
     acc_cfg.mediaConfig.transportConfig.port = cfg.rtp_port_min;
 
     if (cfg.pbx_mode) {
+        RuntimeMetrics::instance().setSipMode(true);
+
         acc_cfg.idUri = cfg.pbx_id_uri;
         acc_cfg.regConfig.registrarUri = cfg.pbx_uri;
 
@@ -112,6 +126,9 @@ int main()
         spdlog::info("       - Registrar: {}", cfg.pbx_uri);
         spdlog::info("       - ID URI: {}", cfg.pbx_id_uri);
     } else {
+        RuntimeMetrics::instance().setSipMode(false);
+        RuntimeMetrics::instance().setSipRegistration(true, 200);
+
         acc_cfg.idUri = "sip:voicebot@127.0.0.1";
         spdlog::info("[VBGW] Local Mode Enabled (No PBX). Direct IP calls: {}", acc_cfg.idUri);
     }
@@ -125,6 +142,7 @@ int main()
         spdlog::error("Error creating account: {}", err.info());
         return 1;
     }
+    HttpServer::getInstance().setAccount(&acc);
 
     // [H-4, H-5, E-2 Fix] 내장 관리 서버 시작
     if (!HttpServer::getInstance().start(cfg.http_port)) {
@@ -138,8 +156,11 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    // 1. 진행 중인 모든 통화 강제 종료 (PBX에 BYE 전송)
-    spdlog::info("[Shutdown 1/3] Hanging up all active calls...");
+    // [R-3 Fix] 4단계 Graceful Shutdown 시퀀스
+    // PBX/SBC 연동 안정성을 위해 각 단계 완료를 보장하며 순차 진행
+
+    // 1단계: 진행 중인 모든 통화 강제 종료 (PBX에 BYE 전송)
+    spdlog::info("[Shutdown 1/4] Hanging up all active calls...");
     SessionManager::getInstance().hangupAllCalls();
 
     // 네트워크 상으로 BYE 패킷이 안전하게 전송될 시간을 확보
@@ -148,21 +169,31 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         max_wait_ms -= 100;
     }
+    if (SessionManager::getInstance().getActiveCallCount() > 0) {
+        spdlog::warn("[Shutdown] {} calls still active after BYE timeout",
+                     SessionManager::getInstance().getActiveCallCount());
+    }
 
-    // 2. 로컬 SIP 포트 닫기 및 계정 정리
-    spdlog::info("[Shutdown 2/3] Destroying account...");
+    // 2단계: 모든 콜의 AI gRPC 세션 명시적 종료
+    // hangup→onCallState(DISCONNECTED) 체인이 타임아웃 내에 완료되지 않을 수 있으므로
+    // AI 스트림을 직접 정리하여 orphan gRPC 스트림 방지
+    spdlog::info("[Shutdown 2/4] Ending all AI sessions...");
+    SessionManager::getInstance().endAllAiSessions();
+
+    // 3단계: HTTP Admin 중단 (더 이상의 Outbound Call 수신 차단)
+    spdlog::info("[Shutdown 3/4] Stopping HTTP Admin Server...");
+    HttpServer::getInstance().stop();
+    HttpServer::getInstance().setAccount(nullptr);
+
+    // 4단계: 로컬 SIP 포트 닫기 및 PJSIP 엔진 완벽히 내리기
+    spdlog::info("[Shutdown 4/4] Shutting down SIP/PJLIB...");
     try {
         acc.modify(acc_cfg);
     } catch (pj::Error& err) {
         spdlog::warn("[Shutdown] Account modify error (non-fatal): {}", err.info());
     }
 
-    // 3. PJSIP 엔진 완벽히 내리기
-    spdlog::info("[Shutdown 3/3] Shutting down PJLIB...");
     ep.shutdown();
-
-    // HTTP Server 종료
-    HttpServer::getInstance().stop();
 
     spdlog::info("Gateway shutdown complete. Goodbye!");
     return 0;

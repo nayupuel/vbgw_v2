@@ -1,6 +1,7 @@
 #include "VoicebotAiClient.h"
 
 #include "../utils/AppConfig.h"
+#include "../utils/RuntimeMetrics.h"
 
 #include <spdlog/spdlog.h>
 
@@ -16,7 +17,11 @@ using voicebot::ai::AudioChunk;
 using Stream = grpc::ClientReaderWriter<AudioChunk, AiResponse>;
 
 VoicebotAiClient::VoicebotAiClient(std::shared_ptr<Channel> channel)
-    : stub_(voicebot::ai::VoicebotAiService::NewStub(channel)), is_running_(false)
+    : stub_(voicebot::ai::VoicebotAiService::NewStub(channel)),
+      is_running_(false),
+      // [R-4 Fix] 재연결 정책을 AppConfig에서 읽어 초기화
+      max_reconnect_retries_(AppConfig::instance().grpc_max_reconnect_retries),
+      max_backoff_ms_(AppConfig::instance().grpc_max_backoff_ms)
 {}
 
 VoicebotAiClient::~VoicebotAiClient()
@@ -46,13 +51,97 @@ static std::chrono::system_clock::time_point makeStreamDeadline()
     return std::chrono::system_clock::now() + std::chrono::seconds(secs);
 }
 
+const char* VoicebotAiClient::streamStateName(StreamState state)
+{
+    switch (state) {
+        case StreamState::Idle:
+            return "Idle";
+        case StreamState::Starting:
+            return "Starting";
+        case StreamState::Streaming:
+            return "Streaming";
+        case StreamState::Backoff:
+            return "Backoff";
+        case StreamState::Reconnecting:
+            return "Reconnecting";
+        case StreamState::Closing:
+            return "Closing";
+        case StreamState::Closed:
+            return "Closed";
+        case StreamState::Failed:
+            return "Failed";
+    }
+    return "Unknown";
+}
+
+void VoicebotAiClient::setStreamState(StreamState next_state, const std::string& reason)
+{
+    const auto prev = state_.exchange(next_state, std::memory_order_acq_rel);
+    if (prev == next_state) {
+        return;
+    }
+
+    if (next_state == StreamState::Failed) {
+        if (!reason.empty()) {
+            spdlog::error("[gRPC] State {} -> {} [session={}, reason={}]", streamStateName(prev),
+                          streamStateName(next_state), current_session_id_, reason);
+        } else {
+            spdlog::error("[gRPC] State {} -> {} [session={}]", streamStateName(prev),
+                          streamStateName(next_state), current_session_id_);
+        }
+        return;
+    }
+
+    if (!reason.empty()) {
+        spdlog::debug("[gRPC] State {} -> {} [session={}, reason={}]", streamStateName(prev),
+                      streamStateName(next_state), current_session_id_, reason);
+    } else {
+        spdlog::debug("[gRPC] State {} -> {} [session={}]", streamStateName(prev),
+                      streamStateName(next_state), current_session_id_);
+    }
+}
+
+bool VoicebotAiClient::isPermanentFailureStatus(grpc::StatusCode code)
+{
+    switch (code) {
+        case grpc::StatusCode::INVALID_ARGUMENT:
+        case grpc::StatusCode::PERMISSION_DENIED:
+        case grpc::StatusCode::UNAUTHENTICATED:
+        case grpc::StatusCode::FAILED_PRECONDITION:
+        case grpc::StatusCode::UNIMPLEMENTED:
+        case grpc::StatusCode::INTERNAL:
+        case grpc::StatusCode::DATA_LOSS:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void VoicebotAiClient::startSession(const std::string& session_id)
 {
+    bool expected = false;
+    if (!is_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        spdlog::warn("[gRPC] startSession ignored because session is already running: {}",
+                     current_session_id_);
+        return;
+    }
+
     current_session_id_ = session_id;
+    setStreamState(StreamState::Starting, "open_stream");
 
     auto new_context = std::make_unique<grpc::ClientContext>();
     new_context->set_deadline(makeStreamDeadline());
     auto new_stream = stub_->StreamSession(new_context.get());
+    if (!new_stream) {
+        is_running_.store(false, std::memory_order_release);
+        setStreamState(StreamState::Failed, "initial_stream_creation_failed");
+        RuntimeMetrics::instance().incGrpcStreamErrors();
+        RuntimeMetrics::instance().markGrpcUnhealthy();
+        if (on_error_) {
+            on_error_("Failed to create initial gRPC stream");
+        }
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -60,8 +149,10 @@ void VoicebotAiClient::startSession(const std::string& session_id)
         stream_ = std::move(new_stream);
     }
 
-    is_running_.store(true, std::memory_order_release);
     reconnect_attempts_ = 0;
+    RuntimeMetrics::instance().incGrpcActiveSessions();
+    RuntimeMetrics::instance().markGrpcHealthy();
+    setStreamState(StreamState::Streaming, "initial_stream_ready");
     worker_thread_ = std::thread(&VoicebotAiClient::streamWorker, this);
     read_thread_ = std::thread(&VoicebotAiClient::readWorker, this);
 
@@ -84,10 +175,12 @@ void VoicebotAiClient::sendAudio(const uint8_t* data, size_t len, bool is_speaki
         if (audio_queue_.size() >= kMaxAudioQueueSize) {
             spdlog::warn("[gRPC] Audio queue full ({} frames). Dropping frame for session: {}",
                          kMaxAudioQueueSize, current_session_id_);
+            RuntimeMetrics::instance().incGrpcDroppedFrames();
             return;
         }
 
         audio_queue_.push({std::vector<uint8_t>(data, data + len), is_speaking});
+        RuntimeMetrics::instance().addGrpcQueuedFrames(1);
     }
     queue_cv_.notify_one();
 }
@@ -107,6 +200,7 @@ void VoicebotAiClient::streamWorker()
 
             item = std::move(audio_queue_.front());
             audio_queue_.pop();
+            RuntimeMetrics::instance().subGrpcQueuedFrames(1);
         }
 
         std::shared_ptr<Stream> local_stream;
@@ -124,6 +218,9 @@ void VoicebotAiClient::streamWorker()
             if (!local_stream->Write(chunk)) {
                 spdlog::warn("[gRPC] Stream write failed for session: {}. Triggering reconnect.",
                              current_session_id_);
+                setStreamState(StreamState::Reconnecting, "write_failed");
+                RuntimeMetrics::instance().incGrpcStreamErrors();
+                RuntimeMetrics::instance().markGrpcUnhealthy();
                 std::lock_guard<std::mutex> lock(stream_mutex_);
                 if (context_)
                     context_->TryCancel();
@@ -140,6 +237,7 @@ void VoicebotAiClient::endSession()
     if (!is_running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
         return;
 
+    setStreamState(StreamState::Closing, "end_session");
     queue_cv_.notify_all();
 
     // [H-2 Fix] endSession() 스트림 정리 개선
@@ -154,10 +252,32 @@ void VoicebotAiClient::endSession()
         }
     }
 
-    if (worker_thread_.joinable())
-        worker_thread_.join();
-    if (read_thread_.joinable())
-        read_thread_.join();
+    if (worker_thread_.joinable()) {
+        if (worker_thread_.get_id() == std::this_thread::get_id()) {
+            worker_thread_.detach();
+        } else {
+            worker_thread_.join();
+        }
+    }
+    if (read_thread_.joinable()) {
+        if (read_thread_.get_id() == std::this_thread::get_id()) {
+            read_thread_.detach();
+        } else {
+            read_thread_.join();
+        }
+    }
+
+    size_t pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        pending = audio_queue_.size();
+        while (!audio_queue_.empty()) {
+            audio_queue_.pop();
+        }
+    }
+    if (pending > 0) {
+        RuntimeMetrics::instance().subGrpcQueuedFrames(pending);
+    }
 
     {
         std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -185,10 +305,14 @@ void VoicebotAiClient::endSession()
             }
             stream_.reset();
         }
+        context_.reset();
     }
+
+    RuntimeMetrics::instance().decGrpcActiveSessions();
+    setStreamState(StreamState::Closed, "session_ended");
 }
 
-bool VoicebotAiClient::tryConnectAndRead()
+VoicebotAiClient::ReadOutcome VoicebotAiClient::tryConnectAndRead()
 {
     std::shared_ptr<Stream> local_stream;
     {
@@ -196,22 +320,28 @@ bool VoicebotAiClient::tryConnectAndRead()
         local_stream = stream_;
     }
 
-    if (!local_stream)
-        return is_running_.load(std::memory_order_acquire);
+    if (!local_stream) {
+        return {ReadOutcomeKind::Reconnect,
+                Status(grpc::StatusCode::UNAVAILABLE, "stream pointer is null")};
+    }
 
     AiResponse response;
     while (is_running_.load(std::memory_order_acquire) && local_stream->Read(&response)) {
+        RuntimeMetrics::instance().markGrpcHealthy();
         if (response.type() == AiResponse::TTS_AUDIO) {
             const std::string& audio = response.audio_data();
             if (on_tts_received_ && !audio.empty()) {
                 on_tts_received_(reinterpret_cast<const uint8_t*>(audio.data()), audio.size());
             }
         } else if (response.type() == AiResponse::STT_RESULT) {
-            spdlog::info("[AI STT] User ({}): {}", current_session_id_, response.text_content());
+            // [S-3 Fix] STT 결과는 debug 레벨로 하향 — 고객 발화 텍스트는 PII 포함 가능성
+            spdlog::debug("[AI STT] Session {}: [REDACTED {} chars]", current_session_id_,
+                          response.text_content().size());
         } else if (response.type() == AiResponse::END_OF_TURN) {
             if (response.clear_buffer() && on_tts_clear_) {
                 spdlog::warn("🚨 [Barge-In] Flushed Gateway TTS RingBuffer! Session: {}",
                              current_session_id_);
+                RuntimeMetrics::instance().incBargeInEvents();
                 on_tts_clear_();
             }
         }
@@ -219,42 +349,93 @@ bool VoicebotAiClient::tryConnectAndRead()
         reconnect_attempts_ = 0;
     }
 
-    return is_running_.load(std::memory_order_acquire);
+    if (!is_running_.load(std::memory_order_acquire)) {
+        return {ReadOutcomeKind::Stopped, Status::OK};
+    }
+
+    Status status = local_stream->Finish();
+    if (status.ok()) {
+        return {ReadOutcomeKind::Completed, status};
+    }
+
+    RuntimeMetrics::instance().markGrpcUnhealthy();
+    if (isPermanentFailureStatus(status.error_code())) {
+        return {ReadOutcomeKind::PermanentFailure, status};
+    }
+
+    return {ReadOutcomeKind::Reconnect, status};
 }
 
 void VoicebotAiClient::readWorker()
 {
     while (is_running_.load(std::memory_order_acquire)) {
-        bool needs_reconnect = tryConnectAndRead();
+        ReadOutcome outcome = tryConnectAndRead();
 
-        if (!needs_reconnect || !is_running_.load(std::memory_order_acquire))
+        if (!is_running_.load(std::memory_order_acquire))
             break;
 
-        if (reconnect_attempts_ >= kMaxReconnectRetries) {
-            spdlog::error("[gRPC] Max reconnect retries ({}) exceeded. Triggering error callback.",
-                          kMaxReconnectRetries);
-            if (on_error_)
-                on_error_("gRPC STT/TTS Stream permanently disconnected after retries");
+        if (outcome.kind == ReadOutcomeKind::Stopped ||
+            outcome.kind == ReadOutcomeKind::Completed) {
+            setStreamState(StreamState::Closed, "remote_stream_completed");
+            break;
+        }
+
+        if (outcome.kind == ReadOutcomeKind::PermanentFailure) {
+            setStreamState(StreamState::Failed, "permanent_stream_failure");
+            RuntimeMetrics::instance().incGrpcStreamErrors();
+            RuntimeMetrics::instance().markGrpcUnhealthy();
+            is_running_.store(false, std::memory_order_release);
+            queue_cv_.notify_all();
+            if (on_error_) {
+                on_error_(std::string("gRPC permanent error [code=") +
+                          std::to_string(static_cast<int>(outcome.status.error_code())) +
+                          "]: " + outcome.status.error_message());
+            }
             return;
         }
 
-        // 지수 백오프: 500ms * 2^n (최대 16초)
-        int wait_ms = std::min(500 * (1 << reconnect_attempts_.load()), 16000);
+        if (reconnect_attempts_ >= max_reconnect_retries_) {
+            spdlog::error("[gRPC] Max reconnect retries ({}) exceeded. Triggering error callback.",
+                          max_reconnect_retries_);
+            setStreamState(StreamState::Failed, "max_retries_exceeded");
+            RuntimeMetrics::instance().incGrpcStreamErrors();
+            RuntimeMetrics::instance().markGrpcUnhealthy();
+            is_running_.store(false, std::memory_order_release);
+            queue_cv_.notify_all();
+            if (on_error_) {
+                on_error_(std::string("gRPC stream disconnected after retries [last_code=") +
+                          std::to_string(static_cast<int>(outcome.status.error_code())) +
+                          "]: " + outcome.status.error_message());
+            }
+            return;
+        }
+
+        // [R-1 Fix] 지수 백오프: 500ms * 2^n (최대 max_backoff_ms_, 콜봇 특화 기본값 4초)
+        int wait_ms = std::min(500 * (1 << reconnect_attempts_.load()), max_backoff_ms_);
         reconnect_attempts_++;
-        spdlog::warn("[gRPC] Stream disconnected. Reconnecting in {}ms (attempt {}/{})", wait_ms,
-                     reconnect_attempts_.load(), kMaxReconnectRetries);
+        setStreamState(StreamState::Backoff, "reconnect_backoff");
+        RuntimeMetrics::instance().incGrpcReconnectAttempts();
+        spdlog::warn("[gRPC] Stream disconnected [code={} msg='{}']. Reconnecting in {}ms "
+                     "(attempt {}/{})",
+                     static_cast<int>(outcome.status.error_code()), outcome.status.error_message(),
+                     wait_ms, reconnect_attempts_.load(), max_reconnect_retries_);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+        if (!is_running_.load(std::memory_order_acquire)) {
+            break;
+        }
 
+        setStreamState(StreamState::Reconnecting, "create_new_stream");
         auto new_context = std::make_unique<grpc::ClientContext>();
         new_context->set_deadline(makeStreamDeadline());
         auto new_stream = stub_->StreamSession(new_context.get());
 
         if (!new_stream) {
-            spdlog::error("[gRPC] Failed to create new stream. Aborting reconnect.");
-            if (on_error_)
-                on_error_("gRPC stream re-creation failed");
-            return;
+            spdlog::error("[gRPC] Failed to create new stream. Will retry until retry budget "
+                          "exhausted.");
+            RuntimeMetrics::instance().incGrpcStreamErrors();
+            RuntimeMetrics::instance().markGrpcUnhealthy();
+            continue;
         }
 
         {
@@ -263,7 +444,26 @@ void VoicebotAiClient::readWorker()
             stream_ = std::move(new_stream);
         }
 
+        // [R-1 Fix] 재연결 성공 시 큐 비우기 — 오래된 오디오가 AI에 전달되면 STT 결과 부정확
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            size_t flushed = audio_queue_.size();
+            while (!audio_queue_.empty()) {
+                audio_queue_.pop();
+            }
+            if (flushed > 0) {
+                RuntimeMetrics::instance().subGrpcQueuedFrames(flushed);
+                spdlog::info("[gRPC] Flushed {} stale audio frames after reconnection", flushed);
+            }
+        }
+
+        reconnect_attempts_ = 0;
+        RuntimeMetrics::instance().markGrpcHealthy();
+        setStreamState(StreamState::Streaming, "reconnected");
         spdlog::info("[gRPC] Reconnected stream for session: {}", current_session_id_);
+    }
+    if (state_.load(std::memory_order_acquire) != StreamState::Failed) {
+        setStreamState(StreamState::Closed, "read_worker_exit");
     }
     spdlog::debug("[gRPC] readWorker exited for session: {}", current_session_id_);
 }

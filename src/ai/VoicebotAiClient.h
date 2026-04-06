@@ -41,9 +41,38 @@ public:
     void endSession();
 
 private:
-    void streamWorker();       // 비동기 워커 스레드 (Tx)
-    void readWorker();         // 비동기 수신 스레드 (Rx) - 지수 백오프 재연결 포함
-    bool tryConnectAndRead();  // 재연결을 포함한 실제 스트리밍 수행
+    enum class StreamState
+    {
+        Idle = 0,
+        Starting,
+        Streaming,
+        Backoff,
+        Reconnecting,
+        Closing,
+        Closed,
+        Failed,
+    };
+
+    enum class ReadOutcomeKind
+    {
+        Stopped = 0,
+        Completed,
+        Reconnect,
+        PermanentFailure,
+    };
+
+    struct ReadOutcome
+    {
+        ReadOutcomeKind kind;
+        grpc::Status status;
+    };
+
+    void streamWorker();              // 비동기 워커 스레드 (Tx)
+    void readWorker();                // 비동기 수신 스레드 (Rx) - 지수 백오프 재연결 포함
+    ReadOutcome tryConnectAndRead();  // 재연결을 포함한 실제 스트리밍 수행
+    void setStreamState(StreamState next_state, const std::string& reason = "");
+    static const char* streamStateName(StreamState state);
+    static bool isPermanentFailureStatus(grpc::StatusCode code);
 
     std::unique_ptr<voicebot::ai::VoicebotAiService::Stub> stub_;
 
@@ -74,14 +103,14 @@ private:
     std::condition_variable queue_cv_;
 
     std::atomic<bool> is_running_;
+    std::atomic<StreamState> state_{StreamState::Idle};
     std::thread worker_thread_;
     std::thread read_thread_;
 
-    // 재연결 정책
-    static constexpr int kMaxReconnectRetries = 5;
+    // [R-4 Fix] 재연결 정책 — AppConfig에서 동적 설정
+    int max_reconnect_retries_;
+    int max_backoff_ms_;
     std::atomic<int> reconnect_attempts_{0};
 
-    // [M-1 Fix] 오디오 큐 최대 크기 — 초과 시 드롭하여 메모리 무한 증가 방지
-    // 200프레임 × 20ms = ~4초 버퍼 (AI 엔진 지연 시 백프레셔)
     static constexpr size_t kMaxAudioQueueSize = 200;
 };

@@ -75,7 +75,38 @@ public:
                 pj::CallOpParam prm;
                 prm.statusCode = PJSIP_SC_DECLINE;
                 call->hangup(prm);
-            } catch (...) {}
+            } catch (const pj::Error& e) {
+                // [T-4 Fix] catch(...) 사일런스 → 명시적 로깅
+                spdlog::debug("[SessionManager] hangup suppressed pj::Error: {}", e.info());
+            } catch (const std::exception& e) {
+                spdlog::debug("[SessionManager] hangup suppressed error: {}", e.what());
+            } catch (...) {
+                spdlog::debug("[SessionManager] hangup suppressed unknown error");
+            }
+        }
+    }
+
+    // [R-3 Fix] Graceful Shutdown 시 각 콜의 gRPC AI 세션을 명시적으로 종료
+    // hangupAllCalls() → onCallState(DISCONNECTED) 체인이 타임아웃 내에
+    // 완료되지 않을 수 있으므로, AI 스트림을 직접 정리하여 orphan 방지
+    void endAllAiSessions()
+    {
+        std::vector<std::shared_ptr<VoicebotCall>> active_calls;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto& pair : calls_) {
+                active_calls.push_back(pair.second);
+            }
+        }
+        spdlog::info("[SessionManager] Ending {} AI sessions...", active_calls.size());
+        for (auto& call : active_calls) {
+            try {
+                call->endAiSession();
+            } catch (const std::exception& e) {
+                spdlog::debug("[SessionManager] endAiSession suppressed error: {}", e.what());
+            } catch (...) {
+                spdlog::debug("[SessionManager] endAiSession suppressed unknown error");
+            }
         }
     }
 

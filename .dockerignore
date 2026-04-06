@@ -1,0 +1,45 @@
+# VBGW Docker Ignore
+# 빌드 컨텍스트에서 불필요한 파일/디렉토리 제외
+
+# VCS
+.git
+.gitignore
+
+# Build artifacts
+build/
+*.o
+*.a
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# IDE/Editor
+.cache/
+.ruff_cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Gemini/Claude agent data
+.claude/
+.Codex/
+
+# History & documentation (런타임 불필요)
+history/
+docs/
+
+# Test files (런타임 불필요)
+tests/
+scripts/
+
+# Config examples (런타임에는 환경변수 사용)
+config/.env.example
+
+# Misc
+*.md
+fix_comments.py
+test.sh
+compile_commands.json

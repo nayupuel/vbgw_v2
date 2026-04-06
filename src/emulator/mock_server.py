@@ -91,9 +91,27 @@ def serve():
     # 최대 10개의 동시 통화를 에뮬레이트하는 서버스레드 풀
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     voicebot_pb2_grpc.add_VoicebotAiServiceServicer_to_server(VoicebotAiServiceServicer(), server)
-    server.add_insecure_port("[::]:50051")
+
+    # IPv6 bind 실패 환경(샌드박스/CI) 대응: IPv4 loopback으로 폴백
+    bind_port = 0
+    bind_addr = ""
+    try:
+        bind_port = server.add_insecure_port("[::]:50051")
+        bind_addr = "[::]:50051"
+    except Exception as e:
+        logging.warning("IPv6 bind failed for mock server: %s", e)
+
+    if bind_port == 0:
+        try:
+            bind_port = server.add_insecure_port("127.0.0.1:50051")
+            bind_addr = "127.0.0.1:50051"
+        except Exception as e:
+            logging.warning("IPv4 bind failed for mock server: %s", e)
+    if bind_port == 0:
+        raise RuntimeError("Failed to bind gRPC mock server to 50051 on IPv6/IPv4")
+
     server.start()
-    logging.info("🚀 Python STT/TTS Emulator running on localhost:50051...")
+    logging.info("🚀 Python STT/TTS Emulator running on %s...", bind_addr)
     logging.info("Waiting for VBGW C++ Gateway calls...")
     server.wait_for_termination()
 

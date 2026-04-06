@@ -144,6 +144,31 @@ source .env
     - **인사 해보기**: "안녕하세요?"라고 말하면 에뮬레이터에서 삐- 소리와 함께 답변이 옵니다.
     - **말 끊기(Barge-in)**: AI가 삐- 소리를 내며 답변하는 도중에 내가 다시 시끄럽게 말을 하면, 즉시 소리가 끊기며 다시 내 말을 들을 준비를 합니다.
 
+### Step 4: Outbound API E2E (Null Audio, 팀 온보딩 권장)
+운영 시나리오와 가장 유사한 Outbound API 실콜 플로우를 로컬에서 빠르게 재현합니다.
+
+```bash
+# 최초 1회 (에뮬레이터 가상환경 준비)
+cd src/emulator
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cd ../..
+
+# E2E 실행 (mock AI + vbgw + pjsua callee + outbound API 호출)
+./scripts/e2e_outbound_null_audio.sh config/.env.local
+```
+
+- 성공 기준: `PASS: Outbound API E2E scenario completed successfully.`
+- 제한 환경(샌드박스/오디오 장치 없음)에서는 `SKIP`이 정상일 수 있습니다.
+- 상세 절차/강제 실패 옵션: `docs/testing.md`의 `Outbound API 실제 콜 E2E (Null Audio)` 섹션 참고
+
+운영 배포 전에는 아래 검증도 함께 수행하세요.
+
+```bash
+VALIDATE_PROFILE=production REQUIRE_PRODUCTION_PROFILE=1 ./scripts/validate_prod_env.sh .env
+```
+
 ---
 
 ## 🐳 6. Docker 배포 (Docker Deployment)

@@ -11,20 +11,23 @@
 #include <random>
 #include <sstream>
 
-// [M-9 Fix] UUID v4 생성기 — 분산 환경에서 세션 추적 가능
+// [T-3 Fix] UUID v4 생성기 — std::random_device로 예측 불가능한 시드 사용
+// 분산 환경에서 두 Gateway 인스턴스가 동시 시작해도 세션 ID 충돌 방지
 static std::string generateSessionId()
 {
-    static thread_local std::mt19937 gen(
-        static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    static thread_local std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
 
-    // 간이 UUID v4: xxxxxxxx-xxxx-xxxx-xxxx
+    // 간이 UUID v4: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
     std::ostringstream oss;
     oss << std::hex;
     oss << dist(gen) << "-";
     oss << (dist(gen) & 0xFFFF) << "-";
-    oss << (dist(gen) & 0xFFFF) << "-";
-    oss << (dist(gen) & 0xFFFF);
+    // UUID v4: version 4 표시
+    oss << ((dist(gen) & 0x0FFF) | 0x4000) << "-";
+    // variant bits
+    oss << ((dist(gen) & 0x3FFF) | 0x8000) << "-";
+    oss << dist(gen) << (dist(gen) & 0xFFFF);
     return oss.str();
 }
 
@@ -107,6 +110,7 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
 
                     ai_client_->setTtsClearCallback([weak_self]() {
                         if (auto self = weak_self.lock()) {
+                            self->bargein_count_.fetch_add(1, std::memory_order_relaxed);
                             if (self->media_port_) {
                                 self->media_port_->clearTtsAudio();
                                 self->media_port_->resetVad();
@@ -136,6 +140,11 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
             if (!needs_hangup && !media_port_) {
                 media_port_ = std::make_unique<VoicebotMediaPort>();
                 media_port_->setAiClient(ai_client_);
+                media_port_->setVadSpeechStartCallback([weak_self = weak_from_this()]() {
+                    if (auto self = weak_self.lock()) {
+                        self->vad_trigger_count_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                });
             }
         }  // ai_init_mutex_ released
 
@@ -160,6 +169,20 @@ void VoicebotCall::onDtmfDigit(pj::OnDtmfDigitParam& prm)
 {
     spdlog::info("[IVR] Session={} Received DTMF digit: {}", session_id_, prm.digit);
     // 향후 IVR 메뉴 전환 및 AI 엔진 우회 전송 로직 구현 지점
+}
+
+// [R-3 Fix] Graceful Shutdown 시 AI 세션 명시적 종료
+// SessionManager::endAllAiSessions()에서 호출되어
+// hangup→onCallState(DISCONNECTED) 체인이 타임아웃 내에 완료되지 않을 경우에도
+// gRPC 스트림이 orphan 상태로 남지 않도록 보장
+void VoicebotCall::endAiSession()
+{
+    std::lock_guard<std::mutex> lock(ai_init_mutex_);
+    if (ai_client_) {
+        spdlog::info("[Call] Session={} Ending AI session explicitly", session_id_);
+        ai_client_->endSession();
+        ai_client_.reset();
+    }
 }
 
 void VoicebotCall::dumpCdr(const std::string& reason)

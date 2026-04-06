@@ -1,12 +1,14 @@
 #include "VoicebotAccount.h"
 
 #include "../utils/AppConfig.h"
+#include "../utils/RuntimeMetrics.h"
 #include "SessionManager.h"
 #include "VoicebotCall.h"
 
 #include <pjlib.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 
@@ -33,6 +35,8 @@ VoicebotAccount::~VoicebotAccount()
 void VoicebotAccount::onRegState(OnRegStateParam& prm)
 {
     AccountInfo ai = getInfo();
+    RuntimeMetrics::instance().setSipRegistration(ai.regIsActive, static_cast<int>(prm.code));
+
     if (ai.regIsActive) {
         spdlog::info("[Account] Registered: {} (status={})", ai.uri, static_cast<int>(prm.code));
     } else {
@@ -59,7 +63,11 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
         prm.statusCode = PJSIP_SC_BUSY_HERE;
         try {
             call->hangup(prm);
-        } catch (...) {}
+        } catch (const pj::Error& e) {
+            spdlog::debug("[Account] Reject hangup suppressed pj::Error: {}", e.info());
+        } catch (...) {
+            spdlog::debug("[Account] Reject hangup suppressed unknown error");
+        }
         return;
     }
 
@@ -114,5 +122,101 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
                     SessionManager::getInstance().removeCall(call_id);
                 }
             }));
+    }
+}
+
+bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_call_id,
+                                       std::string* error_message)
+{
+    std::lock_guard<std::mutex> lock(outbound_mutex_);
+
+    if (!SessionManager::getInstance().canAcceptCall()) {
+        if (error_message) {
+            *error_message = "Maximum concurrent call limit reached";
+        }
+        spdlog::warn("[Account] Outbound call rejected (capacity): {}", target_uri);
+        return false;
+    }
+
+    // 외부 스레드(HTTP worker)에서 PJSIP API 호출 시 스레드 등록 필요
+    thread_local pj_thread_desc thread_desc;
+    thread_local pj_thread_t* pj_thread = nullptr;
+    if (!pj_thread_is_registered()) {
+        pj_thread_register("vbgw_outbound", thread_desc, &pj_thread);
+    }
+
+    auto call = std::make_shared<VoicebotCall>(*this);
+    int call_id = PJSUA_INVALID_ID;
+
+    try {
+        CallOpParam prm(true);
+        prm.opt.audioCount = 1;
+        prm.opt.videoCount = 0;
+        call->makeCall(target_uri, prm);
+
+        // makeCall 성공 시 PJSIP call id가 할당되어 있어야 함
+        call_id = call->getInfo().id;
+        if (call_id == PJSUA_INVALID_ID) {
+            if (error_message) {
+                *error_message = "PJSIP returned invalid call id for outbound call";
+            }
+            spdlog::error("[Account] Outbound call created with invalid call id: {}", target_uri);
+            return false;
+        }
+
+        if (!SessionManager::getInstance().tryAddCall(call_id, call)) {
+            if (error_message) {
+                *error_message = "Maximum concurrent call limit reached after call allocation";
+            }
+            spdlog::warn("[Account] Outbound call race-capacity reject (call_id={}): {}", call_id,
+                         target_uri);
+            try {
+                CallOpParam hangup_prm;
+                hangup_prm.statusCode = PJSIP_SC_BUSY_HERE;
+                call->hangup(hangup_prm);
+            } catch (const pj::Error& e) {
+                spdlog::debug("[Account] Outbound hangup suppressed pj::Error: {}", e.info());
+            } catch (...) {
+                spdlog::debug("[Account] Outbound hangup suppressed unknown error");
+            }
+            return false;
+        }
+
+        if (out_call_id) {
+            *out_call_id = call_id;
+        }
+
+        spdlog::info("[Account] Outbound SIP call initiated [call_id={}, target_uri={}]", call_id,
+                     target_uri);
+        return true;
+    } catch (Error& err) {
+        if (error_message) {
+            *error_message = err.info();
+        }
+        spdlog::error("[Account] Outbound call failed [target_uri={}]: {}", target_uri, err.info());
+        if (call_id != PJSUA_INVALID_ID) {
+            SessionManager::getInstance().removeCall(call_id);
+        }
+        return false;
+    } catch (const std::exception& e) {
+        if (error_message) {
+            *error_message = e.what();
+        }
+        spdlog::error("[Account] Outbound call failed with std::exception [target_uri={}]: {}",
+                      target_uri, e.what());
+        if (call_id != PJSUA_INVALID_ID) {
+            SessionManager::getInstance().removeCall(call_id);
+        }
+        return false;
+    } catch (...) {
+        if (error_message) {
+            *error_message = "Unknown outbound call failure";
+        }
+        spdlog::error("[Account] Outbound call failed with unknown error [target_uri={}]",
+                      target_uri);
+        if (call_id != PJSUA_INVALID_ID) {
+            SessionManager::getInstance().removeCall(call_id);
+        }
+        return false;
     }
 }

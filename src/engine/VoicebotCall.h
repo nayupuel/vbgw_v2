@@ -1,6 +1,7 @@
 #pragma once
 #include <pjsua2.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,9 @@ public:
     virtual void onCallState(pj::OnCallStateParam& prm) override;
     virtual void onCallMediaState(pj::OnCallMediaStateParam& prm) override;
     virtual void onDtmfDigit(pj::OnDtmfDigitParam& prm) override;  // [E-3] IVR 레이어
+
+    // [R-3 Fix] Graceful Shutdown 시 AI 세션 명시적 종료
+    void endAiSession();
 
 private:
     std::unique_ptr<VoicebotMediaPort> media_port_;

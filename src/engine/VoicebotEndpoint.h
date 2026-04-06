@@ -18,4 +18,5 @@ public:
 
 private:
     std::unique_ptr<pj::Endpoint> ep_;
+    bool destroyed_ = false;  // [A-2 Fix] libDestroy() 이중 호출 방지
 };

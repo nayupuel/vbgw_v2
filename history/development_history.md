@@ -7,6 +7,8 @@
 
 ## 2026-03-29
 
+- `[83371ba]` **feat(arch): implement Phase 2 & 3 architecture revamps** — 2026-03-29 22:48 (12 파일, +513/-109)
+  - 변경: CMakeLists.txt,README.md,history/development_history.md,src/api/HttpServer.cpp,src/api/HttpServer.h,src/engine/VoicebotCall.cpp,src/engine/VoicebotCall.h,src/engine/VoicebotEndpoint.cpp,src/engine/VoicebotEndpoint.h,src/main.cpp
 - `[d8c57b8]` **build: CMake 멀티플랫폼 대응 및 docs 현행화** — 2026-03-29 22:29 (3 파일, +28/-9)
   - 변경: CMakeLists.txt,docs/architecture.md,docs/troubleshooting.md
 - `[5e3f664]` **docs: 아키텍처 리뷰 보고서 추가** — 2026-03-29 22:12 (1 파일, +649/-0)

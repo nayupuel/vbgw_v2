@@ -86,8 +86,10 @@ execute_process(COMMAND pkg-config --static --libs libpjproject
                 OUTPUT_VARIABLE PJ_RAW_LDFLAGS
                 OUTPUT_STRIP_TRAILING_WHITESPACE)
 set_target_properties(vbgw_lib PROPERTIES LINK_FLAGS "${PJ_RAW_LDFLAGS}")
+set_target_properties(vbgw PROPERTIES LINK_FLAGS "${PJ_RAW_LDFLAGS}")
 
 target_link_libraries(vbgw_lib PUBLIC 
+    ${PJPROJECT_LIBRARIES}
     Boost::headers
     gRPC::grpc++
     protobuf::libprotobuf
@@ -109,7 +111,10 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 enable_testing()
-add_executable(test_vbgw tests/test_ringbuffer.cpp)
+add_executable(test_vbgw
+    tests/test_ringbuffer.cpp
+    tests/test_runtime_metrics.cpp
+)
 target_link_libraries(test_vbgw PRIVATE vbgw_lib GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(test_vbgw)

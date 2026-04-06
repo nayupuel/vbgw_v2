@@ -51,3 +51,37 @@ Voicebot Gateway(VBGW) 운영 중 발생 가능한 문제와 해결 방법입니
 ### 4.1 로그 레벨 조정
 - **현상**: 게이트웨이의 내부 동작(예: SIP 패킷 덤프, 상세 VAD 작동 내역)을 디버깅하고 싶은 경우.
 - **해결**: 환경 변수 `LOG_LEVEL=debug` 또는 `LOG_LEVEL=trace` 설정 후 재실행하십시오. (지원 레벨: trace, debug, info, warn, error, critical)
+
+### 4.2 `/api/v1/calls`가 401/403을 반환함
+- **현상**: Outbound API 호출 시 Unauthorized/Forbidden 응답.
+- **해결**: `X-Admin-Key` 헤더가 설정되어 있는지, 그리고 `ADMIN_API_KEY` 환경변수와 정확히 일치하는지 확인하십시오.
+
+### 4.3 `/api/v1/calls`가 429를 반환함
+- **현상**: Outbound API 호출이 Too Many Requests로 거절됨.
+- **해결**:
+  1. `MAX_CONCURRENT_CALLS` 한계 초과 여부 확인 (`vbgw_active_calls` 관측).
+  2. `ADMIN_API_RATE_LIMIT_RPS` / `ADMIN_API_RATE_LIMIT_BURST` 설정 확인.
+  3. 응답 헤더 `Retry-After`를 준수해 재시도 백오프를 적용하십시오.
+
+### 4.4 운영 환경 보안 설정 점검
+- **현상**: 배포 후 기동 실패 또는 보안 정책 경고.
+- **해결**: 배포 전에 아래 명령으로 필수 보안 설정을 검증하십시오.
+```bash
+VALIDATE_PROFILE=production REQUIRE_PRODUCTION_PROFILE=1 ./scripts/validate_prod_env.sh .env
+```
+
+### 4.5 E2E 스크립트가 `PJMEDIA_EAUD_INIT`으로 SKIP/실패
+- **현상**: `scripts/e2e_outbound_null_audio.sh` 실행 시 오디오 서브시스템 초기화 실패.
+- **원인**: 실행 환경의 미디어/오디오 백엔드 제약(샌드박스, 드라이버, 권한).
+- **해결**:
+  1. `PJSIP_NULL_AUDIO=1` 설정 확인.
+  2. `pjsua --null-audio --version` 동작 여부 확인.
+  3. CI에서는 `pjproject` 설치 여부 및 `pjsua` PATH 확인.
+  4. 미디어 강제 검증이 필요하면 `REQUIRE_MEDIA=1` 옵션으로 실행.
+
+### 4.6 `/ready`가 503을 반환함
+- **현상**: 프로세스는 살아 있으나 readiness 실패.
+- **해결**:
+  1. `/health`의 `sip.registered`, `grpc.healthy` 필드를 확인.
+  2. PBX 모드라면 SIP 등록 상태 복구 후 재확인.
+  3. gRPC 스트림 오류가 누적될 경우 AI 엔진 연결/TLS 인증서/네트워크를 점검.

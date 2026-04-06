@@ -1,5 +1,7 @@
 #include "SileroVad.h"
 
+#include "../utils/RuntimeMetrics.h"
+
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 
@@ -84,6 +86,24 @@ bool SileroVad::isSpeaking(const int16_t* data, size_t count, float threshold)
 bool SileroVad::isSpeakingImpl(const int16_t* data, size_t count, float threshold)
 {
     // vad_mutex_ 보유 가정
+    const bool prev_state = last_speaking_state_;
+
+    // [P-2 Fix] pcm_buffer_ 무한 성장 방지 — 최대 16384 샘플(1초 분량) 상한
+    static constexpr size_t kMaxPcmBufferSize = 16384;
+    if (pcm_buffer_.size() + count > kMaxPcmBufferSize) {
+        // 강제 compact 후에도 초과하면 이전 데이터 버림
+        if (pcm_head_ > 0) {
+            pcm_buffer_.erase(pcm_buffer_.begin(),
+                              pcm_buffer_.begin() + static_cast<std::ptrdiff_t>(pcm_head_));
+            pcm_head_ = 0;
+        }
+        if (pcm_buffer_.size() + count > kMaxPcmBufferSize) {
+            pcm_buffer_.clear();
+            pcm_head_ = 0;
+            spdlog::warn("[VAD] pcm_buffer_ overflow — forced reset ({} samples dropped)", count);
+        }
+    }
+
     pcm_buffer_.insert(pcm_buffer_.end(), data, data + count);
 
     // 512 샘플(32ms) 미만이면 마지막 상태 유지
@@ -159,6 +179,10 @@ bool SileroVad::isSpeakingImpl(const int16_t* data, size_t count, float threshol
     } catch (const Ort::Exception& e) {
         // 추론 실패 시 마지막 상태 유지 — 연속 통화 안정성 우선
         spdlog::error("[VAD] ONNX inference error: {} — returning last state", e.what());
+    }
+
+    if (last_speaking_state_ && !prev_state) {
+        RuntimeMetrics::instance().incVadSpeechEvents();
     }
 
     return last_speaking_state_;

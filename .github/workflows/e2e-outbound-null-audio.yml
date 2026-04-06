@@ -1,0 +1,64 @@
+name: E2E Outbound Null Audio
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  outbound-e2e:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            python3-venv \
+            libboost-dev \
+            libpjproject-dev \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc \
+            libonnxruntime-dev \
+            libspeexdsp-dev \
+            libssl-dev \
+            libspdlog-dev
+
+      - id: siptools
+        name: Install SIP CLI tools
+        run: |
+          sudo apt-get install -y --no-install-recommends pjproject || true
+          if command -v pjsua >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            pjsua --version || true
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "pjsua is not available on this runner; E2E step will be skipped."
+          fi
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Setup emulator venv
+        run: |
+          cd src/emulator
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Run outbound E2E
+        if: steps.siptools.outputs.available == 'true'
+        run: |
+          chmod +x scripts/e2e_outbound_null_audio.sh
+          REQUIRE_MEDIA=1 REQUIRE_E2E=1 ./scripts/e2e_outbound_null_audio.sh config/.env.local

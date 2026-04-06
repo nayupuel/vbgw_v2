@@ -37,6 +37,12 @@ bool VoicebotEndpoint::init()
                      cfg.rtp_port_min, cfg.rtp_port_max);
 
         ep_->libInit(ep_cfg);
+
+        if (cfg.pjsip_null_audio) {
+            ep_->audDevManager().setNullDev();
+            spdlog::info("[Endpoint] PJSIP null-audio device enabled (PJSIP_NULL_AUDIO=1)");
+        }
+
         spdlog::info("[Endpoint] PJSIP initialized [pjsip_log_level={}]", cfg.pjsip_log_level);
         return true;
     } catch (Error& err) {
@@ -84,6 +90,13 @@ bool VoicebotEndpoint::start(int sip_port)
 
 void VoicebotEndpoint::shutdown()
 {
+    // [A-2 Fix] libDestroy() 이중 호출 방지
+    // 소멸자와 main()에서 각각 호출될 수 있으므로 플래그로 보호
+    if (destroyed_) {
+        return;
+    }
+    destroyed_ = true;
+
     try {
         ep_->libDestroy();
     } catch (Error& err) {

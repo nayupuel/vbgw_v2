@@ -40,6 +40,11 @@ void VoicebotMediaPort::setAiClient(std::shared_ptr<VoicebotAiClient> client)
     ai_client_ = client;
 }
 
+void VoicebotMediaPort::setVadSpeechStartCallback(std::function<void()> cb)
+{
+    on_vad_speech_start_ = std::move(cb);
+}
+
 void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 {
     std::shared_ptr<VoicebotAiClient> safe_client;
@@ -57,6 +62,10 @@ void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
         size_t samples = safe_size / 2;
 
         bool is_speaking = vad_->isSpeaking(pcm16, samples);
+        if (is_speaking && !last_vad_state_ && on_vad_speech_start_) {
+            on_vad_speech_start_();
+        }
+        last_vad_state_ = is_speaking;
 
         const uint8_t* raw = reinterpret_cast<const uint8_t*>(frame.buf.data());
         safe_client->sendAudio(raw, safe_size, is_speaking);
@@ -95,6 +104,7 @@ void VoicebotMediaPort::resetVad()
 {
     if (vad_) {
         vad_->resetState();
+        last_vad_state_ = false;
         spdlog::debug("[MediaPort] VAD state reset.");
     }
 }
