@@ -16,13 +16,17 @@ import (
 	"net/http"
 	"time"
 
-	"vbgw-orchestrator/internal/esl"
 	"vbgw-orchestrator/internal/session"
 )
 
+// ESLChecker is the interface HealthHandler needs from ESL client.
+type ESLChecker interface {
+	IsConnected() bool
+}
+
 // HealthHandler holds dependencies for health endpoints.
 type HealthHandler struct {
-	ESL        *esl.Client
+	ESL        ESLChecker
 	Sessions   *session.Manager
 	BridgeURL  string
 	StartTime  time.Time
@@ -30,7 +34,7 @@ type HealthHandler struct {
 }
 
 // NewHealthHandler creates a HealthHandler.
-func NewHealthHandler(eslClient *esl.Client, sessions *session.Manager, bridgeURL string) *HealthHandler {
+func NewHealthHandler(eslClient ESLChecker, sessions *session.Manager, bridgeURL string) *HealthHandler {
 	return &HealthHandler{
 		ESL:       eslClient,
 		Sessions:  sessions,
