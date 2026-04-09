@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | WS↔gRPC 양방향 브릿지
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-08,T-18 | 채널 오버플로우 race 수정, ForwardDtmf 에러 반환
  * ─────────────────────────────────────────
  */
 
@@ -12,6 +13,7 @@ package ws
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -113,17 +115,19 @@ func (s *Session) SetAIPaused(paused bool) {
 }
 
 // ForwardDtmf sends a DTMF digit to the AI via gRPC AudioChunk.dtmf_digit.
-func (s *Session) ForwardDtmf(digit string) {
+// T-18: Returns error so HTTP handler can report failure to caller.
+func (s *Session) ForwardDtmf(digit string) error {
 	stream, err := s.grpcPool.GetStream(s.ctx, s.uuid)
 	if err != nil {
 		slog.Error("ForwardDtmf: gRPC stream unavailable", "uuid", s.uuid, "err", err)
-		return
+		return fmt.Errorf("stream unavailable: %w", err)
 	}
 	if err := stream.SendDtmf(s.uuid, digit); err != nil {
 		slog.Error("ForwardDtmf: gRPC send failed", "uuid", s.uuid, "err", err)
-		return
+		return fmt.Errorf("send failed: %w", err)
 	}
 	slog.Info("DTMF forwarded to gRPC", "uuid", s.uuid, "digit", digit)
+	return nil
 }
 
 // rxLoop reads PCM frames from WebSocket and sends to pcmCh.
@@ -146,16 +150,11 @@ func (s *Session) rxLoop() {
 			return
 		}
 
+		// T-08: Non-blocking enqueue — drop new frame if full (atomic, no race)
 		select {
 		case s.pcmCh <- data:
 		default:
-			// Channel full — drop oldest frame
-			select {
-			case <-s.pcmCh:
-			default:
-			}
-			s.pcmCh <- data
-			slog.Warn("PCM channel overflow, dropped frame", "uuid", s.uuid)
+			slog.Warn("PCM channel full, dropped incoming frame", "uuid", s.uuid)
 		}
 	}
 }
@@ -224,16 +223,12 @@ func (s *Session) aiResponseLoop() {
 		}
 
 		// Route TTS audio to tx channel
+		// T-08: Non-blocking enqueue — drop new frame if full (atomic, no race)
 		if resp.AudioData != nil && len(resp.AudioData) > 0 {
 			select {
 			case s.ttsCh <- resp.AudioData:
 			default:
-				// TTS channel full — drop oldest
-				select {
-				case <-s.ttsCh:
-				default:
-				}
-				s.ttsCh <- resp.AudioData
+				slog.Warn("TTS channel full, dropped incoming frame", "uuid", s.uuid)
 			}
 		}
 	}

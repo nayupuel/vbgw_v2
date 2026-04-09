@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | ESL TCP 연결, auth, event loop
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-02,T-10,T-13 | apiRespCh 직렬화, Sofia ctx, reconnect 직렬화
  * ─────────────────────────────────────────
  */
 
@@ -36,6 +37,7 @@ type Client struct {
 	handler EventHandler
 
 	// Q-04: API response channel — eventLoop routes api/response here
+	// T-02: Expanded buffer to prevent response drop under reconnect race
 	apiRespCh chan string
 
 	connected     bool
@@ -51,7 +53,7 @@ func NewClient(host string, port int, password string, handler EventHandler) *Cl
 		host:      host,
 		port:      port,
 		password:  password,
-		apiRespCh: make(chan string, 1),
+		apiRespCh: make(chan string, 16),
 		handler:  handler,
 		ctx:      ctx,
 		cancel:   cancel,
@@ -273,7 +275,7 @@ func (c *Client) eventLoop() {
 			select {
 			case c.apiRespCh <- body:
 			default:
-				slog.Warn("ESL apiRespCh full, dropping API response")
+				slog.Error("ESL apiRespCh full, dropping API response — possible concurrent API call leak")
 			}
 			continue
 		}

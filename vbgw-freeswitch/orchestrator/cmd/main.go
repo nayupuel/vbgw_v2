@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | ESL 연결, HTTP API, 5단계 셧다운
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-03~T-13,T-19~T-20 | 28개 이슈 수정
  * ─────────────────────────────────────────
  */
 
@@ -121,6 +122,8 @@ func main() {
 				if !eslClient.IsConnected() {
 					metrics.SipRegistered.Set(0)
 				} else {
+					// T-10: Use context-aware timeout to prevent goroutine leak on shutdown
+					sofiaCtx, sofiaCancel := context.WithTimeout(ctx, 5*time.Second)
 					resultCh := make(chan string, 1)
 					go func() {
 						resp, err := eslClient.SendAPI("sofia status gateway pbx-main")
@@ -142,12 +145,15 @@ func main() {
 								slog.Warn("PBX gateway not registered", "status", strings.TrimSpace(resp))
 							}
 						}
-					case <-time.After(5 * time.Second):
+					case <-sofiaCtx.Done():
+						if ctx.Err() != nil {
+							sofiaCancel()
+							return
+						}
 						slog.Warn("Sofia status check timeout (5s)")
 						metrics.SipRegistered.Set(0)
-					case <-ctx.Done():
-						return
 					}
+					sofiaCancel()
 				}
 
 				// S-03: Consecutive failure alarm logic
@@ -199,6 +205,16 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	httpServer.Shutdown(shutdownCtx)
+
+	// T-19: Notify Bridge to prepare for shutdown (stop accepting new streams)
+	bridgeURL := fmt.Sprintf("http://%s:%d", cfg.BridgeHost, cfg.BridgeInternalPort)
+	shutdownBridgeReq, _ := http.NewRequest("POST", bridgeURL+"/internal/shutdown", nil)
+	shutdownBridgeClient := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := shutdownBridgeClient.Do(shutdownBridgeReq); err != nil {
+		slog.Warn("Bridge shutdown notification failed (may be already down)", "err", err)
+	} else {
+		resp.Body.Close()
+	}
 
 	slog.Info("[Shutdown 2/5] ESL: fsctl pause sent")
 	eslClient.Pause()
@@ -336,10 +352,22 @@ func onChannelPark(evt *esl.Event, sessionMgr *session.Manager, eslClient *esl.C
 	// P-02: Store IVR event channel in session for DTMF routing
 	s.IvrEventCh = make(chan any, 16)
 	go func() {
-		// Bridge: typed IvrEventCh → ivrMachine.EventCh
-		for evt := range s.IvrEventCh {
-			if ivrEvt, ok := evt.(ivr.IvrEvent); ok {
-				ivrMachine.EventCh <- ivrEvt
+		// T-03: Bridge IvrEventCh → ivrMachine.EventCh with context-aware send
+		for {
+			select {
+			case <-s.Ctx.Done():
+				return
+			case evt, ok := <-s.IvrEventCh:
+				if !ok {
+					return
+				}
+				if ivrEvt, ok := evt.(ivr.IvrEvent); ok {
+					select {
+					case ivrMachine.EventCh <- ivrEvt:
+					case <-s.Ctx.Done():
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -361,8 +389,11 @@ func onDtmf(evt *esl.Event, sessionMgr *session.Manager) {
 	slog.Info("DTMF received", "session_id", s.SessionID, "digit", digit)
 
 	// P-02: Forward DTMF to IVR state machine
+	// T-03: Use session context to avoid sending to closed channel after Release()
 	if s.IvrEventCh != nil {
 		select {
+		case <-s.Ctx.Done():
+			slog.Warn("DTMF dropped: session context cancelled", "session", s.SessionID, "digit", digit)
 		case s.IvrEventCh <- ivr.IvrEvent{Type: ivr.DtmfEvent, Digit: digit}:
 		default:
 			slog.Warn("IVR event channel full, DTMF dropped", "session", s.SessionID, "digit", digit)

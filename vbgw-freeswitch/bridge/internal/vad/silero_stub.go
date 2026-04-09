@@ -1,3 +1,5 @@
+//go:build !cgo
+
 /**
  * @file silero_stub.go
  * @description Silero VAD stub — CGO 없는 환경(로컬 macOS)에서 energy-based VAD 사용
@@ -8,8 +10,6 @@
  * v1.1.0 | 2026-04-07 | [Implementer] | Phase 2 | 빌드 태그 분리 (!cgo)
  * ─────────────────────────────────────────
  */
-
-//go:build !cgo
 
 package vad
 
@@ -72,4 +72,3 @@ func energyDetect(samples []int16) bool {
 	}
 	return sum/int64(len(samples)) > 800
 }
-

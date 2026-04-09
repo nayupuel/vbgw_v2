@@ -1,11 +1,13 @@
 # docker-compose.yml
 # 변경이력: v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | Phase 1 PoC 3-tier 스택
+# 변경이력: v1.1.0 | 2026-04-09 | [Implementer] | 버전 업그레이드 | FreeSWITCH 1.10 → 1.10.12
+# 변경이력: v1.2.0 | 2026-04-09 | [Implementer] | T-05,T-15,T-17 | ESL/API 기본값 제거, FS 헬스체크 강화, audio_fork TLS
 version: "3.9"
 
 services:
   # ===== Tier 1: FreeSWITCH Media Engine =====
   freeswitch:
-    image: signalwire/freeswitch:1.10
+    image: signalwire/freeswitch:1.10.12
     container_name: vbgw-freeswitch
     restart: unless-stopped
     network_mode: host
@@ -36,14 +38,26 @@ services:
       - PBX_USERNAME=${PBX_USERNAME:-}
       - PBX_PASSWORD=${PBX_PASSWORD:-}
       - PBX_REGISTER=${PBX_REGISTER:-false}
+      - PBX_STANDBY_HOST=${PBX_STANDBY_HOST:-127.0.0.2}
+      - PBX_STANDBY_USERNAME=${PBX_STANDBY_USERNAME:-}
+      - PBX_STANDBY_PASSWORD=${PBX_STANDBY_PASSWORD:-}
+      - PBX_STANDBY_REGISTER=${PBX_STANDBY_REGISTER:-false}
+      - INBOUND_CODEC_PREFS=${INBOUND_CODEC_PREFS:-PCMU@8000h@20i,PCMA@8000h@20i,G722@16000h@20i,opus@48000h@20i}
+      - OUTBOUND_CODEC_PREFS=${OUTBOUND_CODEC_PREFS:-PCMU@8000h@20i,PCMA@8000h@20i,G722@16000h@20i,opus@48000h@20i}
+      - HOLD_MUSIC=${HOLD_MUSIC:-local_stream://moh}
       - BRIDGE_HOST=${BRIDGE_HOST:-127.0.0.1}
       - BRIDGE_WS_PORT=${BRIDGE_WS_PORT:-8090}
-      - ESL_PASSWORD=${ESL_PASSWORD:-ClueCon}
+      # T-05: Removed default 'ClueCon' — MUST set in .env
+      - ESL_PASSWORD=${ESL_PASSWORD}
+      # T-06: Audio fork TLS scheme (ws or wss)
+      - AUDIO_FORK_SCHEME=${AUDIO_FORK_SCHEME:-ws}
+    # T-15: Enhanced healthcheck — verify Sofia SIP profile is actually running
     healthcheck:
-      test: ["CMD", "fs_cli", "-x", "status"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      test: ["CMD", "sh", "-c", "fs_cli -x 'sofia status' | grep -q 'RUNNING' && fs_cli -x 'status' | grep -q 'UP'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # ===== Tier 2: Go Orchestrator =====
   orchestrator:
@@ -59,11 +73,13 @@ services:
     environment:
       - ESL_HOST=${ESL_HOST:-127.0.0.1}
       - ESL_PORT=${ESL_PORT:-8021}
-      - ESL_PASSWORD=${ESL_PASSWORD:-ClueCon}
+      # T-05: Removed default 'ClueCon'
+      - ESL_PASSWORD=${ESL_PASSWORD}
       - BRIDGE_HOST=${BRIDGE_HOST:-127.0.0.1}
       - BRIDGE_INTERNAL_PORT=${BRIDGE_INTERNAL_PORT:-8091}
       - HTTP_PORT=${HTTP_PORT:-8080}
-      - ADMIN_API_KEY=${ADMIN_API_KEY:-changeme-admin-key}
+      # T-17: Removed default 'changeme-admin-key'
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
       - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-20}
       - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-40}
       - MAX_SESSIONS=${MAX_SESSIONS:-100}
@@ -73,8 +89,9 @@ services:
       - RECORDING_MAX_MB=${RECORDING_MAX_MB:-1024}
       - RUNTIME_PROFILE=${RUNTIME_PROFILE:-dev}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - IVR_TRANSFER_TARGET=${IVR_TRANSFER_TARGET:-}
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:${HTTP_PORT:-8080}/live"]
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/live"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -101,11 +118,12 @@ services:
       - ONNX_MODEL_PATH=${ONNX_MODEL_PATH:-/models/silero_vad.onnx}
       - GRPC_MAX_RETRIES=${GRPC_MAX_RETRIES:-5}
       - GRPC_MAX_BACKOFF_MS=${GRPC_MAX_BACKOFF_MS:-4000}
-      - GRPC_STREAM_DEADLINE_SECS=${GRPC_STREAM_DEADLINE_SECS:-86400}
+      # T-28: Reduced from 86400 (24h) to 7200 (2h) to prevent zombie streams
+      - GRPC_STREAM_DEADLINE_SECS=${GRPC_STREAM_DEADLINE_SECS:-7200}
       - ORCHESTRATOR_URL=http://127.0.0.1:${HTTP_PORT:-8080}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:${BRIDGE_INTERNAL_PORT:-8091}/internal/health"]
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8091/internal/health"]
       interval: 10s
       timeout: 5s
       retries: 3

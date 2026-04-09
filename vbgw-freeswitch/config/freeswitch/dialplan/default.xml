@@ -40,7 +40,8 @@
         <action application="start_dtmf"/>
 
         <!-- Step 5: Audio streaming → WebSocket Bridge -->
-        <action application="set" data="audio_fork_url=ws://$${bridge_host}:$${bridge_ws_port}/audio/${uuid}"/>
+        <!-- T-06: WS scheme configurable (ws for dev, wss for prod TLS) -->
+        <action application="set" data="audio_fork_url=$${audio_fork_scheme}://$${bridge_host}:$${bridge_ws_port}/audio/${uuid}"/>
         <action application="audio_fork" data="${audio_fork_url} 16000 mono"/>
 
         <!-- Step 6: Park — Orchestrator가 ESL로 제어 -->

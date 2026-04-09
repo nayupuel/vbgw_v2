@@ -59,11 +59,16 @@
     <!-- Sofia max-sessions (SIP-level 503 rejection when at capacity) -->
     <param name="max-sessions" value="110"/>
 
-    <!-- REFER/REPLACES -->
-    <param name="accept-blind-transfer" value="true"/>
+    <!-- T-07: REFER/REPLACES — disabled by default to prevent call hijacking.
+         Transfer is controlled via Orchestrator ESL commands instead. -->
+    <param name="accept-blind-transfer" value="false"/>
 
-    <!-- SIP User-Agent header (운영 식별용) -->
-    <param name="user-agent-string" value="VBGW-FreeSWITCH/1.0"/>
+    <!-- T-15: SIP-level DoS protection — limit inbound INVITE rate -->
+    <param name="calls-per-second" value="30"/>
+    <param name="sip-options-respond-503-on-busy" value="true"/>
+
+    <!-- SIP User-Agent header (stripped of FS name for security — L-01) -->
+    <param name="user-agent-string" value="VBGW/1.0"/>
   </settings>
 
   <!-- P-11: Multi-gateway with failover (primary + standby PBX) -->

@@ -60,6 +60,11 @@
   <!-- Hold Music (P-09: for early media / hold) -->
   <X-PRE-PROCESS cmd="set" data="hold_music=${HOLD_MUSIC:-local_stream://moh}"/>
 
-  <!-- ESL -->
-  <X-PRE-PROCESS cmd="set" data="esl_password=${ESL_PASSWORD:-ClueCon}"/>
+  <!-- T-06: Audio fork WS/WSS scheme (default ws, prod should use wss) -->
+  <X-PRE-PROCESS cmd="set" data="audio_fork_scheme=${AUDIO_FORK_SCHEME:-ws}"/>
+
+  <!-- ESL — T-05: No fallback. ESL_PASSWORD MUST be set via environment variable.
+       If empty, event_socket.conf.xml will use a blank password which blocks all ESL access.
+       Generate with: openssl rand -hex 16 -->
+  <X-PRE-PROCESS cmd="set" data="esl_password=${ESL_PASSWORD}"/>
 </include>

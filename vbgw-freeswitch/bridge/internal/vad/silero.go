@@ -1,3 +1,5 @@
+//go:build cgo
+
 /**
  * @file silero.go
  * @description Silero VAD v4 ONNX 추론 엔진 — onnxruntime-go 바인딩
@@ -6,16 +8,16 @@
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | energy-based stub
  * v1.1.0 | 2026-04-07 | [Implementer] | Phase 2 | 실제 ONNX 추론 구현 (cgo 빌드 태그)
+ * v1.2.0 | 2026-04-09 | [Implementer] | T-01 | infer() 입력 텐서 업데이트 수정 + ORT_LIB_PATH 환경변수
  * ─────────────────────────────────────────
  */
-
-//go:build cgo
 
 package vad
 
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
@@ -36,10 +38,13 @@ type Engine struct {
 	mu        sync.Mutex
 	buffer    []int16
 
+	// T-01: Input tensor (kept as field so infer() can update its data)
+	input *ort.Tensor[float32] // [1, vadWindowSamples]
+
 	// Silero VAD v4 state tensors (LSTM hidden states)
-	h *ort.Tensor[float32] // [2, 1, 64]
-	c *ort.Tensor[float32] // [2, 1, 64]
-	sr *ort.Tensor[int64]  // [1] = 16000
+	h  *ort.Tensor[float32] // [2, 1, 64]
+	c  *ort.Tensor[float32] // [2, 1, 64]
+	sr *ort.Tensor[int64]   // [1] = 16000
 
 	// Output tensor
 	output *ort.Tensor[float32] // [1, 1]
@@ -78,7 +83,7 @@ func (e *Engine) loadModel() error {
 	outputShape := ort.NewShape(1, 1)
 
 	// Create input tensors
-	inputTensor, err := ort.NewEmptyTensor[float32](inputShape)
+	e.input, err = ort.NewEmptyTensor[float32](inputShape)
 	if err != nil {
 		return fmt.Errorf("input tensor: %w", err)
 	}
@@ -117,7 +122,7 @@ func (e *Engine) loadModel() error {
 	// Create session
 	// Silero VAD v4 inputs: input, sr, h, c
 	// Silero VAD v4 outputs: output, hn, cn
-	inputs := []ort.ArbitraryTensor{inputTensor, e.sr, e.h, e.c}
+	inputs := []ort.ArbitraryTensor{e.input, e.sr, e.h, e.c}
 	outputs := []ort.ArbitraryTensor{e.output, e.hn, e.cn}
 
 	e.session, err = ort.NewAdvancedSession(
@@ -131,8 +136,6 @@ func (e *Engine) loadModel() error {
 	if err != nil {
 		return fmt.Errorf("ONNX session: %w", err)
 	}
-
-	_ = inputTensor // kept in session
 
 	return nil
 }
@@ -160,16 +163,18 @@ func (e *Engine) Process(pcmBytes []byte) bool {
 }
 
 // infer runs ONNX inference on a 512-sample window.
-// Reuses the pre-loaded e.session — does NOT create a new session per call.
+// T-01: Writes normalized samples directly into the pre-allocated input tensor,
+// then runs inference. Reuses e.session — does NOT create a new session per call.
 func (e *Engine) infer(samples []int16) bool {
-	if e.session == nil {
+	if e.session == nil || e.input == nil {
 		return energyDetectFallback(samples)
 	}
 
-	// Normalize int16 → float32 [-1.0, 1.0]
-	inputData := make([]float32, len(samples))
+	// T-01 FIX: Write normalized samples directly into the input tensor's backing data.
+	// Previously created a local []float32 that was never attached to the session.
+	inputSlice := e.input.GetData()
 	for i, s := range samples {
-		inputData[i] = float32(s) / 32768.0
+		inputSlice[i] = float32(s) / 32768.0
 	}
 
 	// Copy h/c state from previous hn/cn output (LSTM state propagation)
@@ -191,12 +196,27 @@ func (e *Engine) Close() {
 	if e.session != nil {
 		e.session.Destroy()
 	}
-	if e.h != nil { e.h.Destroy() }
-	if e.c != nil { e.c.Destroy() }
-	if e.sr != nil { e.sr.Destroy() }
-	if e.output != nil { e.output.Destroy() }
-	if e.hn != nil { e.hn.Destroy() }
-	if e.cn != nil { e.cn.Destroy() }
+	if e.input != nil {
+		e.input.Destroy()
+	}
+	if e.h != nil {
+		e.h.Destroy()
+	}
+	if e.c != nil {
+		e.c.Destroy()
+	}
+	if e.sr != nil {
+		e.sr.Destroy()
+	}
+	if e.output != nil {
+		e.output.Destroy()
+	}
+	if e.hn != nil {
+		e.hn.Destroy()
+	}
+	if e.cn != nil {
+		e.cn.Destroy()
+	}
 	ort.DestroyEnvironment()
 	slog.Info("VAD engine closed (ONNX)")
 }
@@ -218,5 +238,8 @@ func energyDetectFallback(samples []int16) bool {
 }
 
 func getOrtLibPath() string {
+	if p := os.Getenv("ORT_LIB_PATH"); p != "" {
+		return p
+	}
 	return "/usr/local/lib/libonnxruntime.so"
 }

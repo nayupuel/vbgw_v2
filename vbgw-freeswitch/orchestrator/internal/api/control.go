@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | 6개 제어 엔드포인트
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-03,T-11,T-18 | IvrEventCh ctx guard, body close, RecordStart UUID검증
  * ─────────────────────────────────────────
  */
 
@@ -110,8 +111,10 @@ func (h *ControlHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Q-06: Send HangupEvent to IVR to clean up state after transfer
+	// T-03: Guard with session context to avoid sending to closed channel
 	if s.IvrEventCh != nil {
 		select {
+		case <-s.Ctx.Done():
 		case s.IvrEventCh <- ivr.IvrEvent{Type: ivr.HangupEvent}:
 		default:
 		}

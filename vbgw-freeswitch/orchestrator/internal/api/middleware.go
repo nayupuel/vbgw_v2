@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | OWASP 준수 인증 + rate limit
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-26 | IP별 rate limiter + 전역 limiter 병행
  * ─────────────────────────────────────────
  */
 
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"vbgw-orchestrator/internal/metrics"
@@ -37,12 +39,38 @@ func AuthMiddleware(expectedKey string) func(http.Handler) http.Handler {
 	}
 }
 
-// RateLimitMiddleware applies a token bucket rate limiter.
+// RateLimitMiddleware applies per-IP + global token bucket rate limiters.
+// T-26: Per-IP limiter prevents a single client from exhausting the global budget.
 func RateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler {
-	limiter := rate.NewLimiter(rate.Limit(rps), burst)
+	globalLimiter := rate.NewLimiter(rate.Limit(rps), burst)
+	var ipLimiters sync.Map // map[string]*rate.Limiter
+
+	// Per-IP: each IP gets rps/2 rate, burst/2 capacity
+	perIPRate := rate.Limit(rps / 2)
+	perIPBurst := burst / 2
+	if perIPBurst < 1 {
+		perIPBurst = 1
+	}
+
+	getIPLimiter := func(ip string) *rate.Limiter {
+		v, ok := ipLimiters.Load(ip)
+		if ok {
+			return v.(*rate.Limiter)
+		}
+		l := rate.NewLimiter(perIPRate, perIPBurst)
+		actual, _ := ipLimiters.LoadOrStore(ip, l)
+		return actual.(*rate.Limiter)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow() {
+			ip := r.RemoteAddr
+			if idx := strings.LastIndex(ip, ":"); idx >= 0 {
+				ip = ip[:idx]
+			}
+			ip = strings.Trim(ip, "[]")
+
+			if !globalLimiter.Allow() || !getIPLimiter(ip).Allow() {
 				metrics.ApiRateLimited.Inc()
 				w.Header().Set("Retry-After", "1")
 				http.Error(w, `{"error":"too many requests"}`, http.StatusTooManyRequests)

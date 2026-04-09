@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | /audio/{uuid} WS 엔드포인트
+ * v1.0.1 | 2026-04-09 | [Implementer] | T-18 | DTMF 에러 반환, shutdown 엔드포인트
  * ─────────────────────────────────────────
  */
 
@@ -133,6 +134,13 @@ func (s *Server) InternalHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// T-19: Shutdown notification from Orchestrator
+	mux.HandleFunc("/internal/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("Shutdown notification received from Orchestrator")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"shutting_down"}`))
+	})
+
 	mux.HandleFunc("/internal/dtmf/", func(w http.ResponseWriter, r *http.Request) {
 		uuid := extractUUID(r.URL.Path, "/internal/dtmf/")
 
@@ -145,7 +153,11 @@ func (s *Server) InternalHandler() http.Handler {
 		}
 
 		if sess, ok := s.GetSession(uuid); ok {
-			sess.ForwardDtmf(body.Digit)
+			// T-18: Return error to caller if DTMF forwarding fails
+			if err := sess.ForwardDtmf(body.Digit); err != nil {
+				http.Error(w, `{"error":"dtmf forward failed"}`, http.StatusInternalServerError)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 	})

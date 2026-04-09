@@ -6,6 +6,7 @@
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | StreamSession 양방향 스트리밍
  * v1.1.0 | 2026-04-07 | [Implementer] | Phase 2 | stub → 실제 proto StreamSession 연동
+ * v1.2.0 | 2026-04-09 | [Implementer] | T-04,T-09 | CloseSend 추가, GetStream 중복 방지
  * ─────────────────────────────────────────
  */
 
@@ -34,12 +35,12 @@ type AiResponse struct {
 
 // Stream wraps a gRPC bidirectional stream for a single session.
 type Stream struct {
-	uuid     string
+	uuid       string
 	grpcStream grpc.BidiStreamingClient[pb.AudioChunk, pb.AiResponse]
-	sendCh   chan sendMsg
-	ctx      context.Context
-	cancel   context.CancelFunc
-	recvCh   chan *AiResponse
+	sendCh     chan sendMsg
+	ctx        context.Context
+	cancel     context.CancelFunc
+	recvCh     chan *AiResponse
 }
 
 type sendMsg struct {
@@ -122,30 +123,29 @@ func (p *Pool) Connect(ctx context.Context) error {
 }
 
 // GetStream returns or creates a bidirectional stream for the given UUID.
-// Thread-safe: uses mutex to prevent duplicate stream creation.
+// T-09: Always uses lock to prevent duplicate stream creation race.
 func (p *Pool) GetStream(ctx context.Context, uuid string) (*Stream, error) {
-	// Fast path: check cache without lock
+	// Fast path: check cache without lock (read-only, safe with sync.Map)
 	if v, ok := p.streams.Load(uuid); ok {
 		s := v.(*Stream)
-		// Verify stream is still alive
 		select {
 		case <-s.ctx.Done():
-			p.streams.Delete(uuid) // Stale stream, remove and recreate
+			// Stale — fall through to locked path
 		default:
 			return s, nil
 		}
 	}
 
-	// Slow path: lock to prevent duplicate creation
+	// Lock to prevent duplicate creation
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Double-check after acquiring lock
+	// Double-check after acquiring lock (another goroutine may have created it)
 	if v, ok := p.streams.Load(uuid); ok {
 		s := v.(*Stream)
 		select {
 		case <-s.ctx.Done():
-			p.streams.Delete(uuid)
+			p.streams.Delete(uuid) // Remove stale under lock, then recreate below
 		default:
 			return s, nil
 		}
@@ -207,7 +207,13 @@ func (p *Pool) Close() {
 
 // streamSendLoop reads from sendCh and sends AudioChunk to gRPC.
 func (p *Pool) streamSendLoop(s *Stream) {
-	defer slog.Info("gRPC send loop exited", "uuid", s.uuid)
+	// T-04: Always CloseSend on exit to notify server that send is done
+	defer func() {
+		if err := s.grpcStream.CloseSend(); err != nil {
+			slog.Error("gRPC CloseSend failed", "uuid", s.uuid, "err", err)
+		}
+		slog.Info("gRPC send loop exited", "uuid", s.uuid)
+	}()
 
 	for {
 		select {

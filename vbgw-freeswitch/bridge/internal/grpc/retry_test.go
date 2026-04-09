@@ -31,12 +31,12 @@ func TestPermanentCodes_Contains7Codes(t *testing.T) {
 func TestPermanentCodes_RetryableCodes(t *testing.T) {
 	// These codes SHOULD be retried (not in permanentCodes)
 	retryable := []codes.Code{
-		codes.Unavailable,          // Server temporarily unavailable
-		codes.DeadlineExceeded,     // Timeout
-		codes.Aborted,              // Transaction conflict
-		codes.ResourceExhausted,    // Rate limited
-		codes.Canceled,             // Client cancelled
-		codes.Unknown,              // Unknown error
+		codes.Unavailable,       // Server temporarily unavailable
+		codes.DeadlineExceeded,  // Timeout
+		codes.Aborted,           // Transaction conflict
+		codes.ResourceExhausted, // Rate limited
+		codes.Canceled,          // Client cancelled
+		codes.Unknown,           // Unknown error
 	}
 
 	for _, code := range retryable {

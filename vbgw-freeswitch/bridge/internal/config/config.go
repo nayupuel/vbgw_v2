@@ -43,14 +43,15 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		WSPort:              envInt("WS_PORT", 8090),
-		InternalPort:        envInt("INTERNAL_PORT", 8091),
-		AIGrpcAddr:          envStr("AI_GRPC_ADDR", "127.0.0.1:50051"),
-		AIGrpcTLS:           envBool("AI_GRPC_TLS", false),
-		OnnxModelPath:       envStr("ONNX_MODEL_PATH", "/models/silero_vad.onnx"),
-		GrpcMaxRetries:      envInt("GRPC_MAX_RETRIES", 5),
-		GrpcMaxBackoffMs:    envInt("GRPC_MAX_BACKOFF_MS", 4000),
-		GrpcStreamDeadlineS: envInt("GRPC_STREAM_DEADLINE_SECS", 86400),
+		WSPort:           envInt("WS_PORT", 8090),
+		InternalPort:     envInt("INTERNAL_PORT", 8091),
+		AIGrpcAddr:       envStr("AI_GRPC_ADDR", "127.0.0.1:50051"),
+		AIGrpcTLS:        envBool("AI_GRPC_TLS", false),
+		OnnxModelPath:    envStr("ONNX_MODEL_PATH", "/models/silero_vad.onnx"),
+		GrpcMaxRetries:   envInt("GRPC_MAX_RETRIES", 5),
+		GrpcMaxBackoffMs: envInt("GRPC_MAX_BACKOFF_MS", 4000),
+		// T-28: Reduced from 86400 (24h) to 7200 (2h) to prevent zombie streams
+		GrpcStreamDeadlineS: envInt("GRPC_STREAM_DEADLINE_SECS", 7200),
 		OrchestratorURL:     envStr("ORCHESTRATOR_URL", "http://127.0.0.1:8080"),
 		LogLevel:            envStr("LOG_LEVEL", "info"),
 	}

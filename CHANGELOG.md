@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## [v2.9.0] - 2026-04-09
+### 페르소나: [Implementer]
+### 작업 유형: 보안수정 + 버그수정 + 기능추가 — 프로덕션 전체 리뷰 28개 이슈 반영
+
+#### Fixed (CRITICAL)
+- `vad/silero.go`: T-01 ONNX infer()에서 입력 텐서 미업데이트 → input.GetData()에 직접 쓰기
+- `esl/client.go`: T-02 apiRespCh 버퍼 1→16 확대 (응답 유실 방지)
+- `cmd/main.go`: T-03 DTMF→IvrEventCh 전송 시 session context 검사 (closed channel panic 방지)
+- `grpc/client.go`: T-04 streamSendLoop 종료 시 CloseSend() 호출 (gRPC 스트림 좀비화 방지)
+
+#### Security (CRITICAL)
+- `docker-compose.yml`: T-05 ESL_PASSWORD 기본값 'ClueCon' 제거 — .env 필수 설정
+- `dialplan/default.xml`: T-06 audio_fork URL `ws://` → `$${audio_fork_scheme}://` (프로덕션 wss 강제)
+- `internal.xml`: T-07 accept-blind-transfer `true` → `false` (call hijacking 방지)
+
+#### Fixed (HIGH)
+- `ws/session.go`: T-08 PCM/TTS 채널 오버플로우 시 비원자적 read+write 제거 → non-blocking drop
+- `grpc/client.go`: T-09 GetStream fast path에서 stale 제거 후 재확인 없이 create → lock으로 보호
+- `cmd/main.go`: T-10 Sofia monitor timeout goroutine → context.WithTimeout 적용
+- `api/health.go`: T-11 Bridge 응답 Body 항상 defer Close (fd leak 방지)
+- `internal.xml`: T-15 calls-per-second=30, sip-options-respond-503-on-busy (SIP DoS 방어)
+- `validate_prod.sh`: T-16 ESL 기본 비밀번호 warn → fail 격상
+- `docker-compose.yml`: T-17 ADMIN_API_KEY 기본값 'changeme-admin-key' 제거
+- `ws/session.go`: T-18 ForwardDtmf() 에러 반환 + HTTP 500 응답
+
+#### Added (MEDIUM)
+- `cmd/main.go`: T-19 Shutdown 시 Bridge /internal/shutdown 알림
+- `ivr/machine.go`: T-20 IVR inactivity timeout 5분 (자동 disconnect)
+- `bridge/cmd/main.go`: T-21 gRPC 초기 연결 실패 시 Error 로그 격상
+- `middleware.go`: T-26 IP별 rate limiter (전역 + per-IP 이중 제한)
+- `api/server.go`: T-27 /health를 auth 그룹으로 이동 (내부 상태 노출 방지)
+
+#### Changed (MEDIUM)
+- `.env.example`: T-22 SESSION_TIMEOUT 기본값 0→1800 (vars.xml과 통일)
+- `.env.example`: T-23 RTP_PORT_MAX 기본값 32768→16584 (docker-compose와 통일)
+- `cutover.sh`: T-24 SLO 99.9% 판정에 bc 부동소수점 비교 적용
+- `slo_monitor.sh`: T-25 curl 실패 시 set -e 격리 (모니터 중단 방지)
+- `bridge/config/config.go` + `docker-compose.yml`: T-28 gRPC 스트림 데드라인 86400→7200초
+- `docker-compose.prod.yml`: T-14 FS restart_policy 추가, T-06 AUDIO_FORK_SCHEME=wss
+- `internal.xml`: L-01 user-agent-string에서 FreeSWITCH 명칭 제거
+
+---
+
+## [v2.8.0] - 2026-04-09
+### 페르소나: [Implementer]
+### 작업 유형: 기능추가 — FreeSWITCH 버전 업그레이드 1.10 → 1.10.12
+
+#### Changed
+- `docker-compose.yml`: FreeSWITCH 이미지 `signalwire/freeswitch:1.10` → `signalwire/freeswitch:1.10.12`
+  - v1.10.12 (2024-08-03): ARM64 지원, 버그픽스, 안정성 개선
+  - v1.10.11 (2023-12-22): 보안 취약점 수정
+  - v1.10.10 (2023-08-13): Debian 12, OpenSSL 3, FFmpeg 5 지원
+- `docker-compose.yml`: vars.xml에서 참조하는 누락 환경변수 추가 (PBX_STANDBY_*, CODEC_PREFS, HOLD_MUSIC)
+
+---
+
 ## [v2.7.0] - 2026-04-07
 ### 페르소나: [Implementer]
 ### 작업 유형: 버그수정 + 기능추가 — PBX/SBC 연동 3차 심층 검토 R-01~R-07 반영

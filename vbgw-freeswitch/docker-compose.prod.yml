@@ -1,14 +1,19 @@
 # docker-compose.prod.yml — Production 오버레이
 # 변경이력: v1.0.0 | 2026-04-07 | [Implementer] | Phase 4 | TLS/SRTP 강제 + 로그 제한 + 리소스
+# 변경이력: v1.1.0 | 2026-04-09 | [Implementer] | T-06,T-14,T-28 | audio_fork TLS, FS restart policy, gRPC deadline
 #
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 version: "3.9"
 
 services:
   freeswitch:
+    # T-14: Override restart policy — on-failure prevents infinite crash loop in compose mode
+    restart: on-failure:5
     environment:
       - SIP_TLS_ONLY=true
       - SRTP_MODE=mandatory
+      # T-06: Enforce WSS for audio fork in production
+      - AUDIO_FORK_SCHEME=wss
     deploy:
       resources:
         limits:

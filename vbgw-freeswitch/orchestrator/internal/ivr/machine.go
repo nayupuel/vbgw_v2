@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | IDLE→MENU→AI_CHAT/TRANSFER/DISCONNECT
+ * v1.1.0 | 2026-04-09 | [Implementer] | T-20 | IVR inactivity timeout (default 5min)
  * ─────────────────────────────────────────
  */
 
@@ -13,6 +14,7 @@ package ivr
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
 // State represents the IVR FSM state.
@@ -67,6 +69,9 @@ type Callbacks struct {
 	OnForwardDtmf func(digit string)
 }
 
+// T-20: Default inactivity timeout (no DTMF activity in Menu state)
+const defaultInactivityTimeout = 5 * time.Minute
+
 // Machine is a channel-based IVR FSM. Single goroutine, no mutex needed.
 type Machine struct {
 	sessionID string
@@ -86,8 +91,12 @@ func NewMachine(sessionID string, cb Callbacks) *Machine {
 }
 
 // Run processes events until context is cancelled. Must be called as a goroutine.
+// T-20: Added inactivity timeout — if no events for 5 minutes, auto-disconnect.
 func (m *Machine) Run(ctx context.Context) {
 	slog.Info("IVR machine started", "session", m.sessionID, "state", m.state.String())
+	inactivityTimer := time.NewTimer(defaultInactivityTimeout)
+	defer inactivityTimer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -95,6 +104,13 @@ func (m *Machine) Run(ctx context.Context) {
 			return
 		case evt := <-m.EventCh:
 			m.handleEvent(evt)
+			inactivityTimer.Reset(defaultInactivityTimeout)
+		case <-inactivityTimer.C:
+			slog.Warn("IVR inactivity timeout", "session", m.sessionID, "state", m.state.String())
+			if m.cb.OnDisconnect != nil {
+				m.cb.OnDisconnect()
+			}
+			return
 		}
 	}
 }

@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | 3-way 헬스체크
+ * v1.0.1 | 2026-04-09 | [Implementer] | T-11 | Bridge 응답 Body 항상 Close
  * ─────────────────────────────────────────
  */
 
@@ -85,13 +86,19 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check Bridge
+	// T-11: Always close response body to prevent fd leak
 	bridgeResp, err := h.httpClient.Get(h.BridgeURL + "/internal/health")
-	if err != nil || bridgeResp.StatusCode != http.StatusOK {
+	if err != nil {
 		resp.Bridge = "unreachable"
 		resp.Status = "degraded"
 	} else {
-		resp.Bridge = "healthy"
-		bridgeResp.Body.Close()
+		defer bridgeResp.Body.Close()
+		if bridgeResp.StatusCode != http.StatusOK {
+			resp.Bridge = "unreachable"
+			resp.Status = "degraded"
+		} else {
+			resp.Bridge = "healthy"
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

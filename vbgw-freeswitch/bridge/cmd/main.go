@@ -5,6 +5,7 @@
  * 변경 이력
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | Phase 1 PoC 엔트리포인트
+ * v1.0.1 | 2026-04-09 | [Implementer] | T-21 | gRPC 초기 연결 실패 시 Error 로그
  * ─────────────────────────────────────────
  */
 
@@ -46,8 +47,10 @@ func main() {
 
 	// Initialize gRPC pool
 	grpcPool := grpcclient.NewPool(cfg.AIGrpcAddr, cfg.AIGrpcTLS)
+	// T-21: Log at Error level (not Warn) — all calls will fail until AI engine is reachable
 	if err := grpcclient.RetryConnect(ctx, grpcPool); err != nil {
-		slog.Warn("gRPC initial connection failed (will retry per-session)", "err", err)
+		slog.Error("gRPC initial connection failed — calls will fail until AI engine is reachable",
+			"err", err, "ai_grpc_addr", cfg.AIGrpcAddr)
 	}
 	defer grpcPool.Close()
 

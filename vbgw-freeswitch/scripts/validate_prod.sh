@@ -49,9 +49,10 @@ if [ -f .env ]; then
     fi
 
     # ESL password
-    ESL_PW=$(grep "^ESL_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2- || echo "ClueCon")
-    if [ "${ESL_PW}" = "ClueCon" ]; then
-        warn "ESL_PASSWORD is default 'ClueCon' — consider changing"
+    # T-16: ESL default password is now a FAIL (security critical)
+    ESL_PW=$(grep "^ESL_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2- || echo "")
+    if [ "${ESL_PW}" = "ClueCon" ] || [ -z "${ESL_PW}" ]; then
+        fail "ESL_PASSWORD must not be default 'ClueCon' or empty — generate with: openssl rand -hex 16"
     else
         pass "ESL_PASSWORD is not default"
     fi

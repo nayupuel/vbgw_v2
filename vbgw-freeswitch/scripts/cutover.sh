@@ -46,9 +46,10 @@ check_slo() {
         sleep "${interval}"
     done
 
-    local percent=0
+    # T-24: Use bc for floating-point SLO check (integer division can't express 99.9%)
+    local percent="0"
     if [ "${total}" -gt 0 ]; then
-        percent=$((healthy * 100 / total))
+        percent=$(echo "scale=1; ${healthy} * 100 / ${total}" | bc 2>/dev/null || echo "$((healthy * 100 / total))")
     fi
 
     # Check drop rate
@@ -63,9 +64,9 @@ check_slo() {
     echo "  Dropped frames: ${dropped}"
     echo "  Stream errors: ${errors}"
 
-    # Evaluate
-    if [ "${percent}" -lt 99 ]; then
-        echo "  ✗ FAIL: Health uptime ${percent}% < 99%"
+    # T-24: Evaluate with floating-point comparison
+    if echo "${percent} < 99.9" | bc -l 2>/dev/null | grep -q '^1'; then
+        echo "  ✗ FAIL: Health uptime ${percent}% < 99.9%"
         return 1
     fi
 

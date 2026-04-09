@@ -29,13 +29,13 @@ const (
 
 // permanentCodes are gRPC error codes that should not be retried.
 var permanentCodes = map[codes.Code]bool{
-	codes.InvalidArgument:  true,
-	codes.PermissionDenied: true,
-	codes.Unauthenticated:  true,
+	codes.InvalidArgument:    true,
+	codes.PermissionDenied:   true,
+	codes.Unauthenticated:    true,
 	codes.FailedPrecondition: true,
-	codes.Unimplemented:    true,
-	codes.Internal:         true,
-	codes.DataLoss:         true,
+	codes.Unimplemented:      true,
+	codes.Internal:           true,
+	codes.DataLoss:           true,
 }
 
 // RetryConnect attempts to connect with exponential backoff.

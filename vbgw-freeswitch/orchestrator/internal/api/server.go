@@ -6,6 +6,7 @@
  * ─────────────────────────────────────────
  * v1.0.0 | 2026-04-07 | [Implementer] | 최초 생성 | 12 엔드포인트 + Prometheus
  * v1.1.0 | 2026-04-07 | [Implementer] | Phase 3 | pprof 엔드포인트 추가
+ * v1.2.0 | 2026-04-09 | [Implementer] | T-27 | /health를 auth 그룹으로 이동
  * ─────────────────────────────────────────
  */
 
@@ -49,13 +50,16 @@ func NewRouter(cfg *config.Config, eslClient *esl.Client, sessions *session.Mana
 	// Public health endpoints (no auth — liveness/readiness probes)
 	r.Get("/live", healthHandler.Live)
 	r.Get("/ready", healthHandler.Ready)
-	r.Get("/health", healthHandler.Health)
+	// T-27: /health moved to auth group (exposes active_calls, component status)
 
 	// Protected: metrics + API endpoints (require auth)
 	r.Group(func(r chi.Router) {
 		r.Use(MetricsMiddleware)
 		r.Use(RateLimitMiddleware(cfg.RateLimitRPS, cfg.RateLimitBurst))
 		r.Use(AuthMiddleware(cfg.AdminAPIKey))
+
+		// T-27: /health behind auth (exposes internal component status)
+		r.Get("/health", healthHandler.Health)
 
 		// Prometheus metrics (behind auth to prevent info leak)
 		r.Handle("/metrics", promhttp.Handler())
